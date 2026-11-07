@@ -29,7 +29,7 @@ classifiers = [
 ]
 dependencies = [
     "uvicorn>=0.30",
-    "fastapi&gt;=0.111.0",
+    "fastapi&gt>=0.111.0",
     "click>=8",
     "croniter>=2.0",
     "datasets>=4.5.0",
