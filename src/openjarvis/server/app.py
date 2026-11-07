@@ -487,7 +487,7 @@ def create_app(
     app.include_router(research_router)
     app.include_router(analytics_router)
     include_all_routes(app)
-
+    alexa_router = APIRouter()
     # Restore SendBlue channel bindings from database on startup
     _restore_sendblue_bindings(app)
 
@@ -590,20 +590,58 @@ def create_app(
                         }
                     })
                 
-            # Caso genérico ou outras intenções
+          # Caso genérico ou outras intenções
+        return JSONResponse({
+            "version": "1.0",
+            "response": {
+                "outputSpeech": {
+                    "type": "PlainText",
+                    "text": "Bem-vindo ao Jarvis Assistente!"
+                },
+                "shouldEndSession": False
+            }
+        })
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Invalid request")
+
+# Adicione o APIRouter para a Alexa aqui
+
+
+        @alexa_router.post("/api/alexa")
+        async def alexa_webhook(request: Request):
+            try:
+                # Pega o payload enviado pela Alexa
+                payload = await request.json()
+                
+                request_type = payload.get("request", {}).get("type")
+                
+                if request_type == "LaunchRequest":
+                    return JSONResponse({
+                        "version": "1.0",
+                        "response": {
+                            "outputSpeech": {
+                                "type": "PlainText",
+                                "text": "Bem-vindo ao Jarvis Assistente!"
+                            },
+                            "shouldEndSession": False
+                        }
+                    })
+                
                 return JSONResponse({
                     "version": "1.0",
                     "response": {
                         "outputSpeech": {
                             "type": "PlainText",
-                            "text": "Bem-vindo ao Jarvis Assistente!"
+                            "text": "Requisição recebida com sucesso."
                         },
                         "shouldEndSession": False
                     }
                 })
-
             except Exception as e:
                 raise HTTPException(status_code=400, detail="Invalid request")
+
+        app.include_router(alexa_router)
 
     return app
 
