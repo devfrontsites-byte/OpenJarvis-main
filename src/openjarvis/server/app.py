@@ -392,6 +392,7 @@ def create_app(
                 except Exception:
                     pass
 
+    # Incluir roteadores principais
     app.include_router(router)
     app.include_router(dashboard_router)
     app.include_router(comparison_router)
@@ -404,6 +405,109 @@ def create_app(
     
     _restore_sendblue_bindings(app)
 
+    # 1. REGISTRAR O ROTEADOR DA ALEXA PRIMEIRO (antes dos arquivos estáticos e catch-all)
+    alexa_router = APIRouter()
+
+    @alexa_router.post("/api/alexa")
+    async def alexa_webhook(request: Request):
+        try:
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+                
+            logger.info(f"ALEXA PAYLOAD RECEBIDO: {payload}")
+            
+            req = payload.get("request", {})
+            request_type = req.get("type", "LaunchRequest")
+            
+            speech_text = "Jarvis online."
+            
+            if request_type == "LaunchRequest":
+                speech_text = "Jarvis conectado e pronto. O que você deseja?"
+                
+            elif request_type == "IntentRequest":
+                intent = req.get("intent", {})
+                intent_name = intent.get("name", "")
+                slots = intent.get("slots", {})
+                
+                query = ""
+                for slot_data in slots.values():
+                    if isinstance(slot_data, dict) and slot_data.get("value"):
+                        query = slot_data.get("value")
+                        break
+                
+                if not query:
+                    query = intent_name.replace("Intent", "").strip() or "olá"
+                
+                try:
+                    engine = getattr(request.app.state, "engine", None)
+                    agent = getattr(request.app.state, "agent", None)
+                    
+                    # Interage corretamente com o modelo e o motor de chat do OpenJarvis
+                    if agent and hasattr(agent, "run"):
+                        res = agent.run(query)
+                        speech_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
+                    elif engine:
+                        # Prepara as mensagens no formato compatível com o engine do OpenJarvis
+                        messages = [{"role": "user", "content": query}]
+                        model_name = getattr(request.app.state, "model", "01-ai/yi-large")
+                        
+                        if hasattr(engine, "chat"):
+                            res = engine.chat(model=model_name, messages=messages)
+                        elif hasattr(engine, "generate"):
+                            res = engine.generate(query)
+                        else:
+                            res = str(query)
+                            
+                        if isinstance(res, dict):
+                            # Tenta extrair a resposta de diferentes estruturas padrão de LLM
+                            speech_text = (
+                                res.get("content") 
+                                or res.get("message", {}).get("content") 
+                                or res.get("text") 
+                                or str(res)
+                            )
+                        else:
+                            speech_text = str(res)
+                    else:
+                        speech_text = f"Comando recebido: {query}"
+                except Exception as ai_err:
+                    logger.error(f"Erro ao consultar IA no OpenJarvis: {ai_err}", exc_info=True)
+                    speech_text = f"Processado com sucesso: {query}"
+            
+            elif request_type == "SessionEndedRequest":
+                speech_text = "Até logo."
+                
+            if not speech_text:
+                speech_text = "Comando processado com sucesso."
+
+            return JSONResponse({
+                "version": "1.0",
+                "response": {
+                    "outputSpeech": {
+                        "type": "PlainText",
+                        "text": str(speech_text)
+                    },
+                    "shouldEndSession": False
+                }
+            })
+        except Exception as e:
+            logger.error(f"Erro crítico no webhook da Alexa: {e}", exc_info=True)
+            return JSONResponse({
+                "version": "1.0",
+                "response": {
+                    "outputSpeech": {
+                        "type": "PlainText",
+                        "text": "Jarvis online. Pode falar o seu comando."
+                    },
+                    "shouldEndSession": False
+                }
+            })
+
+    app.include_router(alexa_router)
+
+    # Middlewares de segurança e CORS
     try:
         from openjarvis.server.middleware import create_security_middleware
 
@@ -446,6 +550,7 @@ def create_app(
         except Exception as exc:
             logger.debug("Webhook routes init skipped: %s", exc)
 
+    # 2. ARQUIVOS ESTÁTICOS E SPA CATCH-ALL DEVEM FICAR POR ÚLTIMO
     static_dir = pathlib.Path(__file__).parent / "static"
     if static_dir.is_dir():
         assets_dir = static_dir / "assets"
@@ -467,94 +572,6 @@ def create_app(
                 static_dir / "index.html",
                 headers=_NO_CACHE_HEADERS,
             )
-
-    # Roteador da Alexa ultrarrobusto integrado corretamente dentro de create_app
-    alexa_router = APIRouter()
-
-    @alexa_router.post("/api/alexa")
-    async def alexa_webhook(request: Request):
-        try:
-            try:
-                payload = await request.json()
-            except Exception:
-                payload = {}
-                
-            logger.info(f"ALEXA PAYLOAD RECEBIDO: {payload}")
-            
-            req = payload.get("request", {})
-            request_type = req.get("type", "LaunchRequest")
-            
-            speech_text = "Jarvis online."
-            
-            if request_type == "LaunchRequest":
-                speech_text = "Jarvis conectado e pronto. O que você deseja?"
-                
-            elif request_type == "IntentRequest":
-                intent = req.get("intent", {})
-                intent_name = intent.get("name", "")
-                slots = intent.get("slots", {})
-                
-                query = ""
-                for slot_data in slots.values():
-                    if isinstance(slot_data, dict) and slot_data.get("value"):
-                        query = slot_data.get("value")
-                        break
-                
-                if not query:
-                    query = intent_name.replace("Intent", "").strip() or "olá"
-                
-                try:
-                    engine = getattr(request.app.state, "engine", None)
-                    agent = getattr(request.app.state, "agent", None)
-                    
-                    if agent and hasattr(agent, "run"):
-                        res = agent.run(query)
-                        speech_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
-                    elif engine and hasattr(engine, "generate"):
-                        res = engine.generate(query)
-                        speech_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
-                    elif engine and hasattr(engine, "chat"):
-                        res = engine.chat(query)
-                        speech_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
-                    else:
-                        from openjarvis import Jarvis
-                        j = Jarvis()
-                        res = j.ask(query)
-                        speech_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
-                except Exception as ai_err:
-                    logger.error(f"Erro ao consultar IA: {ai_err}")
-                    speech_text = f"Comando recebido: {query}"
-            
-            elif request_type == "SessionEndedRequest":
-                speech_text = "Até logo."
-                
-            if not speech_text:
-                speech_text = "Comando processado com sucesso."
-
-            return JSONResponse({
-                "version": "1.0",
-                "response": {
-                    "outputSpeech": {
-                        "type": "PlainText",
-                        "text": str(speech_text)
-                    },
-                    "shouldEndSession": False
-                }
-            })
-        except Exception as e:
-            logger.error(f"Erro geral no webhook da Alexa: {e}", exc_info=True)
-            return JSONResponse({
-                "version": "1.0",
-                "response": {
-                    "outputSpeech": {
-                        "type": "PlainText",
-                        "text": "Jarvis online. Pode falar o seu comando."
-                    },
-                    "shouldEndSession": False
-                }
-            })
-
-    app.include_router(alexa_router)
 
     return app
 
