@@ -567,43 +567,43 @@ def create_app(
 
  
 
-@app.post("/api/alexa")
-async def alexa_webhook(request: Request):
-    try:
-        # Pega o payload enviado pela Alexa
-        payload = await request.json()
-        
-        # Aqui você insere a lógica para processar o request da Alexa
-        # Por enquanto, estamos apenas validando e retornando uma resposta vazia
-        request_type = payload.get("request", {}).get("type")
-        
-        if request_type == "LaunchRequest":
-             # Exemplo de resposta para início da skill
-             return JSONResponse({
-                "version": "1.0",
-                "response": {
-                    "outputSpeech": {
-                        "type": "PlainText",
-                        "text": "Bem-vindo ao Jarvis Assistente!"
-                    },
-                    "shouldEndSession": False
-                }
-             })
-        
-      # Caso genérico ou outras intenções
-        return JSONResponse({
-            "version": "1.0",
-            "response": {
-                "outputSpeech": {
-                    "type": "PlainText",
-                    "text": "Bem-vindo ao Jarvis Assistente!"
-                },
-                "shouldEndSession": False
-            }
-        })
+        @app.post("/api/alexa")
+        async def alexa_webhook(request: Request):
+            try:
+                # Pega o payload enviado pela Alexa
+                payload = await request.json()
+                
+                # Aqui você insere a lógica para processar o request da Alexa
+                # Por enquanto, estamos apenas validando e retornando uma resposta vazia
+                request_type = payload.get("request", {}).get("type")
+                
+                if request_type == "LaunchRequest":
+                    # Exemplo de resposta para início da skill
+                    return JSONResponse({
+                        "version": "1.0",
+                        "response": {
+                            "outputSpeech": {
+                                "type": "PlainText",
+                                "text": "Bem-vindo ao Jarvis Assistente!"
+                            },
+                            "shouldEndSession": False
+                        }
+                    })
+                
+            # Caso genérico ou outras intenções
+                return JSONResponse({
+                    "version": "1.0",
+                    "response": {
+                        "outputSpeech": {
+                            "type": "PlainText",
+                            "text": "Bem-vindo ao Jarvis Assistente!"
+                        },
+                        "shouldEndSession": False
+                    }
+                })
 
-    except Exception as e:
-        raise HTTPException(status_code=400, detail="Invalid request")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail="Invalid request")
 
     return app
 
