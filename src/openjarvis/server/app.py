@@ -28,6 +28,10 @@ from openjarvis.server.research_router import router as research_router
 from openjarvis.server.routes import router
 from openjarvis.server.upload_router import router as upload_router
 
+           
+from fastapi import Request, HTTPException
+from fastapi.responses import JSONResponse
+
 logger = logging.getLogger(__name__)
 _MANAGED_SHUTDOWN_GRACE_SECONDS = 0.25
 _MANAGED_SHUTDOWN_DRAIN_SECONDS = 10.0
@@ -561,11 +565,7 @@ def create_app(
                 headers=_NO_CACHE_HEADERS,
             )
 
-    
-
-    python
-from fastapi import Request, HTTPException
-from fastapi.responses import JSONResponse
+ 
 
 @app.post("/api/alexa")
 async def alexa_webhook(request: Request):
@@ -603,8 +603,13 @@ async def alexa_webhook(request: Request):
         })
         
     except Exception as e:
-        raise HTTPException(status_code=400, detail="Invalid request")
+        raise HTTPException(status_code=400, detail="Invalid request"
+        
+        )
 
 return app
+    
+
+  
 
 __all__ = ["create_app"]
