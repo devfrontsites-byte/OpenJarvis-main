@@ -591,20 +591,17 @@ def create_app(
                     })
                 
           # Caso genérico ou outras intenções
-        return JSONResponse({
-            "version": "1.0",
-            "response": {
-                "outputSpeech": {
-                    "type": "PlainText",
-                    "text": "Bem-vindo ao Jarvis Assistente!"
-                },
-                "shouldEndSession": False
-            }
-        })
+        try:
+            # Código que pode gerar exceção (ex: leitura do payload, etc.)
+            payload = await request.json()
+            # ...
+            return JSONResponse({
+                "version": "1.0",
+                "response": { ... }
+    })
 
-    except Exception as e:
-        raise HTTPException(status_code=400, detail="Invalid request")
-
+        except Exception as e:
+            raise HTTPException(status_code=400, detail="Invalid request")
 # Adicione o APIRouter para a Alexa aqui
 
 
