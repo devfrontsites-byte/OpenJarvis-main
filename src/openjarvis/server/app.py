@@ -401,90 +401,8 @@ def create_app(
     app.include_router(research_router)
     app.include_router(analytics_router)
     include_all_routes(app)
-
+    
     _restore_sendblue_bindings(app)
-
-    # Roteador da Alexa integrado ao OpenJarvis AI
-    alexa_router = APIRouter()
-
-    @alexa_router.post("/api/alexa")
-    async def alexa_webhook(request: Request):
-        try:
-            payload = await request.json()
-            logger.info(f"Alexa payload received: {payload}")
-            
-            req = payload.get("request", {})
-            request_type = req.get("type")
-            
-            if request_type == "LaunchRequest":
-                return JSONResponse({
-                    "version": "1.0",
-                    "response": {
-                        "outputSpeech": {
-                            "type": "PlainText",
-                            "text": "Jarvis online e conectado à inteligência artificial. O que você deseja?"
-                        },
-                        "shouldEndSession": False
-                    }
-                })
-            
-            query = "Olá Jarvis"
-            if request_type == "IntentRequest":
-                intent = req.get("intent", {})
-                intent_name = intent.get("name", "")
-                slots = intent.get("slots", {})
-                
-                for slot_name, slot_data in slots.items():
-                    if isinstance(slot_data, dict) and slot_data.get("value"):
-                        query = slot_data.get("value")
-                        break
-                
-                if query == "Olá Jarvis" and intent_name:
-                    query = f"Executar intenção {intent_name}"
-            
-            logger.info(f"Query extracted for AI: {query}")
-
-            engine = getattr(request.app.state, "engine", None)
-            agent = getattr(request.app.state, "agent", None)
-            
-            ai_text = None
-            try:
-                if agent and hasattr(agent, "run"):
-                    res = agent.run(query)
-                    ai_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
-                elif engine and hasattr(engine, "generate"):
-                    res = engine.generate(query)
-                    ai_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
-                elif engine and hasattr(engine, "chat"):
-                    res = engine.chat(query)
-                    ai_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
-                else:
-                    from openjarvis import Jarvis
-                    j = Jarvis()
-                    res = j.ask(query)
-                    ai_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
-            except Exception as ai_err:
-                logger.error(f"AI generation error: {ai_err}", exc_info=True)
-                ai_text = f"Comando processado: {query}"
-
-            if not ai_text:
-                ai_text = "Processado com sucesso."
-
-            return JSONResponse({
-                "version": "1.0",
-                "response": {
-                    "outputSpeech": {
-                        "type": "PlainText",
-                        "text": str(ai_text)
-                    },
-                    "shouldEndSession": False
-                }
-            })
-        except Exception as e:
-            logger.error(f"Alexa webhook error: {e}", exc_info=True)
-            raise HTTPException(status_code=400, detail=str(e))
-
-    app.include_router(alexa_router)
 
     try:
         from openjarvis.server.middleware import create_security_middleware
@@ -549,6 +467,94 @@ def create_app(
                 static_dir / "index.html",
                 headers=_NO_CACHE_HEADERS,
             )
+
+    # Roteador da Alexa ultrarrobusto integrado corretamente dentro de create_app
+    alexa_router = APIRouter()
+
+    @alexa_router.post("/api/alexa")
+    async def alexa_webhook(request: Request):
+        try:
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+                
+            logger.info(f"ALEXA PAYLOAD RECEBIDO: {payload}")
+            
+            req = payload.get("request", {})
+            request_type = req.get("type", "LaunchRequest")
+            
+            speech_text = "Jarvis online."
+            
+            if request_type == "LaunchRequest":
+                speech_text = "Jarvis conectado e pronto. O que você deseja?"
+                
+            elif request_type == "IntentRequest":
+                intent = req.get("intent", {})
+                intent_name = intent.get("name", "")
+                slots = intent.get("slots", {})
+                
+                query = ""
+                for slot_data in slots.values():
+                    if isinstance(slot_data, dict) and slot_data.get("value"):
+                        query = slot_data.get("value")
+                        break
+                
+                if not query:
+                    query = intent_name.replace("Intent", "").strip() or "olá"
+                
+                try:
+                    engine = getattr(request.app.state, "engine", None)
+                    agent = getattr(request.app.state, "agent", None)
+                    
+                    if agent and hasattr(agent, "run"):
+                        res = agent.run(query)
+                        speech_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
+                    elif engine and hasattr(engine, "generate"):
+                        res = engine.generate(query)
+                        speech_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
+                    elif engine and hasattr(engine, "chat"):
+                        res = engine.chat(query)
+                        speech_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
+                    else:
+                        from openjarvis import Jarvis
+                        j = Jarvis()
+                        res = j.ask(query)
+                        speech_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
+                except Exception as ai_err:
+                    logger.error(f"Erro ao consultar IA: {ai_err}")
+                    speech_text = f"Comando recebido: {query}"
+            
+            elif request_type == "SessionEndedRequest":
+                speech_text = "Até logo."
+                
+            if not speech_text:
+                speech_text = "Comando processado com sucesso."
+
+            return JSONResponse({
+                "version": "1.0",
+                "response": {
+                    "outputSpeech": {
+                        "type": "PlainText",
+                        "text": str(speech_text)
+                    },
+                    "shouldEndSession": False
+                }
+            })
+        except Exception as e:
+            logger.error(f"Erro geral no webhook da Alexa: {e}", exc_info=True)
+            return JSONResponse({
+                "version": "1.0",
+                "response": {
+                    "outputSpeech": {
+                        "type": "PlainText",
+                        "text": "Jarvis online. Pode falar o seu comando."
+                    },
+                    "shouldEndSession": False
+                }
+            })
+
+    app.include_router(alexa_router)
 
     return app
 
