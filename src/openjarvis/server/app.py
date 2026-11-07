@@ -288,3 +288,268 @@ def create_app(
         def _join_workers(timeout: float) -> None:
             deadline = time.monotonic() + timeout
             for thread in managed_workers:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                thread.join(timeout=remaining)
+
+        scheduler = getattr(app.state, "agent_scheduler", None)
+        scheduler_wait = None
+        scheduler_drained = True
+        if scheduler is not None:
+            try:
+                request_stop = getattr(scheduler, "request_stop", None)
+                wait_stopped = getattr(scheduler, "wait_stopped", None)
+                if callable(request_stop) and callable(wait_stopped):
+                    request_stop()
+                    scheduler_wait = wait_stopped
+                    scheduler_drained = bool(
+                        wait_stopped(timeout=_MANAGED_SHUTDOWN_GRACE_SECONDS)
+                    )
+                else:
+                    scheduler.stop()
+                    scheduler_drained = not bool(
+                        getattr(scheduler, "is_running", False)
+                    )
+            except Exception:
+                scheduler_drained = False
+                logger.debug("Agent scheduler shutdown failed", exc_info=True)
+
+        _join_workers(timeout=_MANAGED_SHUTDOWN_GRACE_SECONDS)
+        with app.state._mcp_clients_lock:
+            mcp_clients_to_close = list(app.state._mcp_clients)
+        for client in mcp_clients_to_close:
+            try:
+                client.close()
+            except Exception:
+                logger.debug("MCP client shutdown failed", exc_info=True)
+
+        if scheduler_wait is not None:
+            try:
+                scheduler_drained = bool(
+                    scheduler_wait(timeout=_MANAGED_SHUTDOWN_DRAIN_SECONDS)
+                )
+            except Exception:
+                scheduler_drained = False
+                logger.debug("Agent scheduler drain failed", exc_info=True)
+        _join_workers(timeout=_MANAGED_SHUTDOWN_DRAIN_SECONDS)
+        alive = [thread.name for thread in managed_workers if thread.is_alive()]
+        if alive:
+            logger.warning("Managed workers did not stop during shutdown: %s", alive)
+
+        owned_memory_backend = None
+        runtime_drained = scheduler_drained and not alive
+        if runtime_drained:
+            with app.state._memory_backend_lock:
+                if app.state._owns_memory_backend:
+                    owned_memory_backend = app.state.memory_backend
+                    app.state.memory_backend = None
+                    app.state._owns_memory_backend = False
+        else:
+            logger.warning(
+                "Skipping memory backend cleanup because managed runtime "
+                "consumers did not stop"
+            )
+        close_memory = getattr(owned_memory_backend, "close", None)
+        if callable(close_memory):
+            try:
+                close_memory()
+            except Exception:
+                logger.debug("Memory backend shutdown failed", exc_info=True)
+
+    app.state.trace_store = None
+    try:
+        from openjarvis.core.config import load_config
+        from openjarvis.traces.store import TraceStore
+
+        cfg = config if config is not None else load_config()
+        if cfg.traces.enabled:
+            app.state.trace_store = TraceStore(db_path=cfg.traces.db_path)
+    except Exception:
+        pass
+
+    app.state.analytics_client = None
+    app.state.analytics_bridge = None
+    try:
+        from openjarvis.core.config import load_config
+
+        _cfg = config if config is not None else load_config()
+        configure_analytics(app, _cfg)
+    except Exception as _exc:
+        logger.debug("Analytics init skipped: %s", _exc)
+
+    @app.on_event("shutdown")
+    async def _shutdown_analytics() -> None:
+        stop_analytics(app)
+
+    if memory_service is not None:
+        @app.on_event("shutdown")
+        async def _shutdown_memory_service() -> None:
+            svc = getattr(app.state, "memory_service", None)
+            if svc is not None:
+                try:
+                    svc.stop()
+                except Exception:
+                    pass
+
+    app.include_router(router)
+    app.include_router(dashboard_router)
+    app.include_router(comparison_router)
+    app.include_router(create_connectors_router())
+    app.include_router(create_digest_router())
+    app.include_router(upload_router)
+    app.include_router(research_router)
+    app.include_router(analytics_router)
+    include_all_routes(app)
+
+    _restore_sendblue_bindings(app)
+
+    # Roteador da Alexa integrado ao OpenJarvis AI
+    alexa_router = APIRouter()
+
+    @alexa_router.post("/api/alexa")
+    async def alexa_webhook(request: Request):
+        try:
+            payload = await request.json()
+            logger.info(f"Alexa payload received: {payload}")
+            
+            req = payload.get("request", {})
+            request_type = req.get("type")
+            
+            if request_type == "LaunchRequest":
+                return JSONResponse({
+                    "version": "1.0",
+                    "response": {
+                        "outputSpeech": {
+                            "type": "PlainText",
+                            "text": "Jarvis online e conectado à inteligência artificial. O que você deseja?"
+                        },
+                        "shouldEndSession": False
+                    }
+                })
+            
+            query = "Olá Jarvis"
+            if request_type == "IntentRequest":
+                intent = req.get("intent", {})
+                intent_name = intent.get("name", "")
+                slots = intent.get("slots", {})
+                
+                for slot_name, slot_data in slots.items():
+                    if isinstance(slot_data, dict) and slot_data.get("value"):
+                        query = slot_data.get("value")
+                        break
+                
+                if query == "Olá Jarvis" and intent_name:
+                    query = f"Executar intenção {intent_name}"
+            
+            logger.info(f"Query extracted for AI: {query}")
+
+            engine = getattr(request.app.state, "engine", None)
+            agent = getattr(request.app.state, "agent", None)
+            
+            ai_text = None
+            try:
+                if agent and hasattr(agent, "run"):
+                    res = agent.run(query)
+                    ai_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
+                elif engine and hasattr(engine, "generate"):
+                    res = engine.generate(query)
+                    ai_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
+                elif engine and hasattr(engine, "chat"):
+                    res = engine.chat(query)
+                    ai_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
+                else:
+                    from openjarvis import Jarvis
+                    j = Jarvis()
+                    res = j.ask(query)
+                    ai_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
+            except Exception as ai_err:
+                logger.error(f"AI generation error: {ai_err}", exc_info=True)
+                ai_text = f"Comando processado: {query}"
+
+            if not ai_text:
+                ai_text = "Processado com sucesso."
+
+            return JSONResponse({
+                "version": "1.0",
+                "response": {
+                    "outputSpeech": {
+                        "type": "PlainText",
+                        "text": str(ai_text)
+                    },
+                    "shouldEndSession": False
+                }
+            })
+        except Exception as e:
+            logger.error(f"Alexa webhook error: {e}", exc_info=True)
+            raise HTTPException(status_code=400, detail=str(e))
+
+    app.include_router(alexa_router)
+
+    try:
+        from openjarvis.server.middleware import create_security_middleware
+
+        middleware_cls = create_security_middleware()
+        if middleware_cls is not None:
+            app.add_middleware(middleware_cls)
+    except Exception as exc:
+        logger.debug("Security middleware init skipped: %s", exc)
+
+    if api_key:
+        try:
+            from openjarvis.server.auth_middleware import AuthMiddleware
+
+            app.add_middleware(AuthMiddleware, api_key=api_key)
+        except Exception as exc:
+            logger.debug("Auth middleware init skipped: %s", exc)
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    if webhook_config:
+        try:
+            from openjarvis.server.webhook_routes import (
+                create_webhook_router,
+            )
+
+            webhook_router = create_webhook_router(
+                bridge=channel_bridge,
+                twilio_auth_token=webhook_config.get("twilio_auth_token", ""),
+                bluebubbles_password=webhook_config.get("bluebubbles_password", ""),
+                whatsapp_verify_token=webhook_config.get("whatsapp_verify_token", ""),
+                whatsapp_app_secret=webhook_config.get("whatsapp_app_secret", ""),
+            )
+            app.include_router(webhook_router)
+        except Exception as exc:
+            logger.debug("Webhook routes init skipped: %s", exc)
+
+    static_dir = pathlib.Path(__file__).parent / "static"
+    if static_dir.is_dir():
+        assets_dir = static_dir / "assets"
+        if assets_dir.is_dir():
+            app.mount(
+                "/assets",
+                _NoCacheStaticFiles(directory=assets_dir),
+                name="static-assets",
+            )
+
+        @app.get("/{full_path:path}")
+        async def spa_catch_all(full_path: str):
+            if full_path:
+                candidate = (static_dir / full_path).resolve()
+                resolved_root = static_dir.resolve()
+                if candidate.is_relative_to(resolved_root) and candidate.is_file():
+                    return FileResponse(candidate, headers=_NO_CACHE_HEADERS)
+            return FileResponse(
+                static_dir / "index.html",
+                headers=_NO_CACHE_HEADERS,
+            )
+
+    return app
+
+__all__ = ["create_app"]
