@@ -590,26 +590,21 @@ async def alexa_webhook(request: Request):
                 }
              })
         
-        # Caso genérico ou outras intenções
+      # Caso genérico ou outras intenções
         return JSONResponse({
             "version": "1.0",
             "response": {
                 "outputSpeech": {
                     "type": "PlainText",
-                    "text": "Requisição recebida com sucesso."
+                    "text": "Bem-vindo ao Jarvis Assistente!"
                 },
                 "shouldEndSession": False
             }
         })
-        
+
     except Exception as e:
-        raise HTTPException(status_code=400, detail="Invalid request"
-        
-        )
+        raise HTTPException(status_code=400, detail="Invalid request")
 
-return app
-    
-
-  
+    return app
 
 __all__ = ["create_app"]
