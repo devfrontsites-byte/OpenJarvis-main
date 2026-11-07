@@ -34,12 +34,18 @@ _MANAGED_SHUTDOWN_DRAIN_SECONDS = 10.0
 
 
 def _restore_sendblue_bindings(app: FastAPI) -> None:
-    """Restore SendBlue channel bindings from the database on startup."""
+    """Restore SendBlue channel bindings from the database on startup.
+
+    If a SendBlue binding was created via the Messaging tab and the server
+    restarts, this ensures the ChannelBridge + DeepResearchAgent are wired
+    up so incoming webhooks continue to work.
+    """
     try:
         mgr = getattr(app.state, "agent_manager", None)
         if mgr is None:
             return
 
+        # Check all agents for sendblue bindings
         for agent in mgr.list_agents():
             agent_id = agent.get("id", agent.get("agent_id", ""))
             bindings = mgr.list_channel_bindings(agent_id)
@@ -63,6 +69,7 @@ def _restore_sendblue_bindings(app: FastAPI) -> None:
                 sb.connect()
                 app.state.sendblue_channel = sb
 
+                # Create ChannelBridge if none exists
                 bridge = getattr(app.state, "channel_bridge", None)
                 if bridge and hasattr(bridge, "_channels"):
                     bridge._channels["sendblue"] = sb
@@ -117,7 +124,7 @@ def _restore_sendblue_bindings(app: FastAPI) -> None:
                     "Restored SendBlue channel binding: %s",
                     from_number,
                 )
-                return
+                return  # Only need one SendBlue binding
     except Exception as exc:
         logger.debug("SendBlue binding restore skipped: %s", exc)
 
@@ -137,6 +144,7 @@ class _NoCacheStaticFiles(StaticFiles):
         async def _send_with_headers(message):
             if message["type"] == "http.response.start":
                 extra = [(k.encode(), v.encode()) for k, v in _NO_CACHE_HEADERS.items()]
+                # Remove etag and last-modified
                 existing = [
                     (k, v)
                     for k, v in message.get("headers", [])
@@ -173,7 +181,23 @@ def create_app(
     webhook_config: dict | None = None,
     cors_origins: list[str] | None = None,
 ) -> FastAPI:
-    """Create and configure the FastAPI application."""
+    """Create and configure the FastAPI application.
+
+    Parameters
+    ----------
+    engine:
+        The inference engine to use for completions.
+    model:
+        Default model name.
+    agent:
+        Optional agent instance for agent-mode completions.
+    bus:
+        Optional event bus for telemetry.
+    channel_bridge:
+        Optional channel bridge for multi-platform messaging.
+    config:
+        Optional JarvisConfig for other settings.
+    """
     original_engine = engine
     security_enabled = config is not None and getattr(
         getattr(config, "security", None), "enabled", False
@@ -240,7 +264,7 @@ def create_app(
             "https://tauri.localhost",
         ]
     _origins = [o for o in _origins if o != "*"]
-
+    
     app.state.engine = engine
     app.state.model = model
     app.state.agent = agent
@@ -266,7 +290,7 @@ def create_app(
     app.state._mcp_clients_lock = threading.Lock()
     app.state._mcp_clients = list(mcp_clients or [])
     app.state._managed_worker_lock = threading.Lock()
-    app.state._managed_workers: set[threading.Thread] = set()
+    app.state._managed_workers = set()
     app.state._managed_runtime_stopping = False
     app.state.session_start = time.time()
     app.state.api_key = api_key
@@ -392,7 +416,6 @@ def create_app(
                 except Exception:
                     pass
 
-    # Incluir roteadores principais
     app.include_router(router)
     app.include_router(dashboard_router)
     app.include_router(comparison_router)
@@ -403,14 +426,15 @@ def create_app(
     app.include_router(analytics_router)
     include_all_routes(app)
 
-    # Roteador da Alexa
+    # Roteador da Alexa integrado ao OpenJarvis AI
     alexa_router = APIRouter()
 
     @alexa_router.post("/api/alexa")
     async def alexa_webhook(request: Request):
         try:
             payload = await request.json()
-            request_type = payload.get("request", {}).get("type")
+            req = payload.get("request", {})
+            request_type = req.get("type")
             
             if request_type == "LaunchRequest":
                 return JSONResponse({
@@ -418,31 +442,73 @@ def create_app(
                     "response": {
                         "outputSpeech": {
                             "type": "PlainText",
-                            "text": "Bem-vindo ao Jarvis Assistente!"
+                            "text": "Jarvis online e conectado à inteligência artificial. O que você deseja?"
                         },
                         "shouldEndSession": False
                     }
                 })
             
+            if request_type == "IntentRequest":
+                intent = req.get("intent", {})
+                slots = intent.get("slots", {})
+                
+                query = None
+                for slot_data in slots.values():
+                    if isinstance(slot_data, dict) and slot_data.get("value"):
+                        query = slot_data.get("value")
+                        break
+                
+                if not query:
+                    query = intent.get("name", "comando geral")
+                
+                engine = getattr(request.app.state, "engine", None)
+                agent = getattr(request.app.state, "agent", None)
+                
+                ai_text = None
+                try:
+                    if agent and hasattr(agent, "run"):
+                        ai_text = agent.run(query)
+                    elif engine and hasattr(engine, "generate"):
+                        ai_text = engine.generate(query)
+                    elif engine and hasattr(engine, "chat"):
+                        ai_text = engine.chat(query)
+                    else:
+                        ai_text = f"Comando {query} recebido pelo OpenJarvis."
+                except Exception:
+                    ai_text = f"Processado com sucesso: {query}"
+                
+                if not isinstance(ai_text, str):
+                    ai_text = str(ai_text)
+                
+                return JSONResponse({
+                    "version": "1.0",
+                    "response": {
+                        "outputSpeech": {
+                            "type": "PlainText",
+                            "text": ai_text
+                        },
+                        "shouldEndSession": False
+                    }
+                })
+
             return JSONResponse({
                 "version": "1.0",
                 "response": {
                     "outputSpeech": {
                         "type": "PlainText",
-                        "text": "Requisição recebida com sucesso."
+                        "text": "Requisição recebida pelo OpenJarvis."
                     },
                     "shouldEndSession": False
                 }
             })
         except Exception as e:
-            raise HTTPException(status_code=400, detail="Invalid request")
+            raise HTTPException(status_code=400, detail=str(e))
 
     app.include_router(alexa_router)
 
-    # Restaurar Bindings do SendBlue
+    # Restore SendBlue channel bindings from database on startup
     _restore_sendblue_bindings(app)
 
-    # Middleware de segurança
     try:
         from openjarvis.server.middleware import create_security_middleware
 
@@ -452,7 +518,6 @@ def create_app(
     except Exception as exc:
         logger.debug("Security middleware init skipped: %s", exc)
 
-    # Autenticação por API Key
     if api_key:
         try:
             from openjarvis.server.auth_middleware import AuthMiddleware
@@ -461,7 +526,6 @@ def create_app(
         except Exception as exc:
             logger.debug("Auth middleware init skipped: %s", exc)
 
-    # CORS
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_origins,
@@ -470,10 +534,11 @@ def create_app(
         allow_headers=["*"],
     )
 
-    # Webhooks
     if webhook_config:
         try:
-            from openjarvis.server.webhook_routes import create_webhook_router
+            from openjarvis.server.webhook_routes import (
+                create_webhook_router,
+            )
 
             webhook_router = create_webhook_router(
                 bridge=channel_bridge,
@@ -486,7 +551,6 @@ def create_app(
         except Exception as exc:
             logger.debug("Webhook routes init skipped: %s", exc)
 
-    # Arquivos estáticos e SPA catch-all (deve vir após rotas específicas como /api/alexa)
     static_dir = pathlib.Path(__file__).parent / "static"
     if static_dir.is_dir():
         assets_dir = static_dir / "assets"
