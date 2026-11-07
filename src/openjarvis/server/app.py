@@ -561,7 +561,7 @@ def create_app(
                 headers=_NO_CACHE_HEADERS,
             )
 
-    return app
+    
 
     python
 from fastapi import Request, HTTPException
@@ -605,5 +605,6 @@ async def alexa_webhook(request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail="Invalid request")
 
+return app
 
 __all__ = ["create_app"]
