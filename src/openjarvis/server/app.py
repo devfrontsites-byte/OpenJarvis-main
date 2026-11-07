@@ -8,8 +8,8 @@ import pathlib
 import threading
 import time
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, APIRouter, Request, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from openjarvis.server.analytics_routes import (
@@ -28,28 +28,18 @@ from openjarvis.server.research_router import router as research_router
 from openjarvis.server.routes import router
 from openjarvis.server.upload_router import router as upload_router
 
-           
-from fastapi import Request, HTTPException
-from fastapi.responses import JSONResponse
-
 logger = logging.getLogger(__name__)
 _MANAGED_SHUTDOWN_GRACE_SECONDS = 0.25
 _MANAGED_SHUTDOWN_DRAIN_SECONDS = 10.0
 
 
 def _restore_sendblue_bindings(app: FastAPI) -> None:
-    """Restore SendBlue channel bindings from the database on startup.
-
-    If a SendBlue binding was created via the Messaging tab and the server
-    restarts, this ensures the ChannelBridge + DeepResearchAgent are wired
-    up so incoming webhooks continue to work.
-    """
+    """Restore SendBlue channel bindings from the database on startup."""
     try:
         mgr = getattr(app.state, "agent_manager", None)
         if mgr is None:
             return
 
-        # Check all agents for sendblue bindings
         for agent in mgr.list_agents():
             agent_id = agent.get("id", agent.get("agent_id", ""))
             bindings = mgr.list_channel_bindings(agent_id)
@@ -73,7 +63,6 @@ def _restore_sendblue_bindings(app: FastAPI) -> None:
                 sb.connect()
                 app.state.sendblue_channel = sb
 
-                # Create ChannelBridge if none exists
                 bridge = getattr(app.state, "channel_bridge", None)
                 if bridge and hasattr(bridge, "_channels"):
                     bridge._channels["sendblue"] = sb
@@ -128,7 +117,7 @@ def _restore_sendblue_bindings(app: FastAPI) -> None:
                     "Restored SendBlue channel binding: %s",
                     from_number,
                 )
-                return  # Only need one SendBlue binding
+                return
     except Exception as exc:
         logger.debug("SendBlue binding restore skipped: %s", exc)
 
@@ -148,7 +137,6 @@ class _NoCacheStaticFiles(StaticFiles):
         async def _send_with_headers(message):
             if message["type"] == "http.response.start":
                 extra = [(k.encode(), v.encode()) for k, v in _NO_CACHE_HEADERS.items()]
-                # Remove etag and last-modified
                 existing = [
                     (k, v)
                     for k, v in message.get("headers", [])
@@ -185,23 +173,7 @@ def create_app(
     webhook_config: dict | None = None,
     cors_origins: list[str] | None = None,
 ) -> FastAPI:
-    """Create and configure the FastAPI application.
-
-    Parameters
-    ----------
-    engine:
-        The inference engine to use for completions.
-    model:
-        Default model name.
-    agent:
-        Optional agent instance for agent-mode completions.
-    bus:
-        Optional event bus for telemetry.
-    channel_bridge:
-        Optional channel bridge for multi-platform messaging.
-    config:
-        Optional JarvisConfig for other settings.
-    """
+    """Create and configure the FastAPI application."""
     original_engine = engine
     security_enabled = config is not None and getattr(
         getattr(config, "security", None), "enabled", False
@@ -215,9 +187,6 @@ def create_app(
             primitive is None
             for primitive in (capability_policy, rate_limiter, audit_logger)
         ):
-            # Programmatic factory callers must receive the same config-driven
-            # enforcement as ``jarvis serve``. Explicitly injected primitives
-            # remain authoritative; only missing pieces are derived.
             from openjarvis.security import setup_security
 
             derived_security = setup_security(config, engine, bus)
@@ -229,9 +198,6 @@ def create_app(
             if audit_logger is None:
                 audit_logger = derived_security.audit_logger
 
-    # A pre-built tool-using agent is part of the factory's remote execution
-    # surface too. Fill only missing executor fields so explicit per-agent
-    # wiring remains authoritative.
     if agent is not None and getattr(agent, "_engine", None) is original_engine:
         agent._engine = engine
     from openjarvis.security.runtime import wire_agent_security
@@ -258,11 +224,6 @@ def create_app(
 
     from fastapi.middleware.cors import CORSMiddleware
 
-    # Allow deployments to pin the exact browser origins via
-    # OPENJARVIS_CORS_ORIGINS (comma-separated). On an exposed server this
-    # should be set to your real frontend origin(s) only — never "*", which
-    # combined with allow_credentials=True would let any website call the API
-    # in the user's authenticated context.
     _env_origins = os.environ.get("OPENJARVIS_CORS_ORIGINS", "").strip()
     if cors_origins is not None:
         _origins = cors_origins
@@ -274,18 +235,12 @@ def create_app(
             "http://127.0.0.1:5173",
             "http://localhost:5174",
             "http://127.0.0.1:5174",
-            # Tauri 2 production webview origins:
-            #   macOS / Linux / iOS  -> tauri://localhost
-            #   Windows / Android    -> http://tauri.localhost (default),
-            #                           https://tauri.localhost when
-            #                           windows.useHttpsScheme is enabled
             "tauri://localhost",
             "http://tauri.localhost",
             "https://tauri.localhost",
         ]
-    # Defense in depth: a literal "*" with credentials is unsafe. Refuse it.
     _origins = [o for o in _origins if o != "*"]
-    # Store dependencies in app state
+
     app.state.engine = engine
     app.state.model = model
     app.state.agent = agent
@@ -303,10 +258,6 @@ def create_app(
     app.state.speech_backend = speech_backend
     app.state.agent_manager = agent_manager
     app.state.agent_scheduler = agent_scheduler
-    # Security primitives for the managed-agent HTTP/SSE routes
-    # (agent_manager_routes.py). Previously never passed here at all, so
-    # every managed agent reached over the network ran with no RBAC gate,
-    # no rate limiting, and no audit trail regardless of config.
     app.state.capability_policy = capability_policy
     app.state.rate_limiter = rate_limiter
     app.state.audit_logger = audit_logger
@@ -318,23 +269,14 @@ def create_app(
     app.state._managed_workers: set[threading.Thread] = set()
     app.state._managed_runtime_stopping = False
     app.state.session_start = time.time()
-    # Exposed so WebSocket handlers can authenticate the handshake (the HTTP
-    # AuthMiddleware never sees WS upgrade requests). Empty = auth disabled.
     app.state.api_key = api_key
 
     @app.on_event("shutdown")
     async def _shutdown_managed_runtime() -> None:
-        # Quiesce every producer before touching the shared MCP pool. Route
-        # workers are registered under this lock, so none can slip in after
-        # the snapshot. The scheduler has a two-phase stop because closing an
-        # MCP transport may be what releases an in-flight tick.
         with app.state._managed_worker_lock:
             app.state._managed_runtime_stopping = True
             managed_workers = list(app.state._managed_workers)
 
-        # Stop external listener threads before draining ticks or closing the
-        # shared MCP pool. Channel callbacks are wired to that same pool by
-        # ``serve`` and otherwise could race teardown or survive app restart.
         channel_bridge = getattr(app.state, "channel_bridge", None)
         disconnect_channels = getattr(channel_bridge, "disconnect", None)
         if callable(disconnect_channels):
@@ -373,7 +315,6 @@ def create_app(
                 scheduler_drained = False
                 logger.debug("Agent scheduler shutdown failed", exc_info=True)
 
-        # Give normal work a brief chance to finish before cancellation.
         _join_workers(timeout=_MANAGED_SHUTDOWN_GRACE_SECONDS)
         with app.state._mcp_clients_lock:
             mcp_clients_to_close = list(app.state._mcp_clients)
@@ -383,10 +324,6 @@ def create_app(
             except Exception:
                 logger.debug("MCP client shutdown failed", exc_info=True)
 
-        # Transport closure interrupts blocked MCP reads. Drain the workers a
-        # second time so shutdown does not return while they still own runtime
-        # state. Any stragglers can no longer issue transport requests because
-        # MCPClient marks itself closed before closing its transport.
         if scheduler_wait is not None:
             try:
                 scheduler_drained = bool(
@@ -400,9 +337,6 @@ def create_app(
         if alive:
             logger.warning("Managed workers did not stop during shutdown: %s", alive)
 
-        # A backend created by ``serve`` or lazily by a managed route belongs
-        # to this app process. Close it only after every tracked consumer has
-        # been drained; injected/borrowed backends remain the caller's concern.
         owned_memory_backend = None
         runtime_drained = scheduler_drained and not alive
         if runtime_drained:
@@ -412,9 +346,6 @@ def create_app(
                     app.state.memory_backend = None
                     app.state._owns_memory_backend = False
         else:
-            # A live worker may itself hold _memory_backend_lock while opening
-            # the backend. Respect the bounded shutdown deadline: do not wait
-            # on that lock or mutate ownership until every consumer is gone.
             logger.warning(
                 "Skipping memory backend cleanup because managed runtime "
                 "consumers did not stop"
@@ -426,16 +357,6 @@ def create_app(
             except Exception:
                 logger.debug("Memory backend shutdown failed", exc_info=True)
 
-    # Wire up trace store if traces are enabled.
-    #
-    # We deliberately do NOT subscribe the trace store to the bus. The chat
-    # endpoints persist through a TraceCollector that calls store.save()
-    # directly (mirroring system/orchestrator.py), and the collector ALSO
-    # publishes TRACE_COMPLETE. A store subscribed to that same bus would
-    # therefore save every agent trace twice — the second INSERT hitting the
-    # UNIQUE constraint on trace_id (a 500 on every completion). Keeping the
-    # collector the single writer is what makes the dual code path safe; only
-    # the telemetry store is bus-subscribed (see system/builder.py).
     app.state.trace_store = None
     try:
         from openjarvis.core.config import load_config
@@ -445,13 +366,8 @@ def create_app(
         if cfg.traces.enabled:
             app.state.trace_store = TraceStore(db_path=cfg.traces.db_path)
     except Exception:
-        pass  # traces are optional; don't block server startup
+        pass
 
-    # Wire up external analytics if enabled (PostHog) — never block startup.
-    # Note: we do NOT fire app_opened here. The frontend owns that event
-    # because "server started" (this code path) is not the same as "user
-    # opened the app" — the server can run headless via cron, daemons,
-    # or test suites.
     app.state.analytics_client = None
     app.state.analytics_bridge = None
     try:
@@ -466,9 +382,7 @@ def create_app(
     async def _shutdown_analytics() -> None:
         stop_analytics(app)
 
-    # Stop the background memory service cleanly when the server shuts down.
     if memory_service is not None:
-
         @app.on_event("shutdown")
         async def _shutdown_memory_service() -> None:
             svc = getattr(app.state, "memory_service", None)
@@ -478,6 +392,7 @@ def create_app(
                 except Exception:
                     pass
 
+    # Incluir roteadores principais
     app.include_router(router)
     app.include_router(dashboard_router)
     app.include_router(comparison_router)
@@ -487,11 +402,47 @@ def create_app(
     app.include_router(research_router)
     app.include_router(analytics_router)
     include_all_routes(app)
+
+    # Roteador da Alexa
     alexa_router = APIRouter()
-    # Restore SendBlue channel bindings from database on startup
+
+    @alexa_router.post("/api/alexa")
+    async def alexa_webhook(request: Request):
+        try:
+            payload = await request.json()
+            request_type = payload.get("request", {}).get("type")
+            
+            if request_type == "LaunchRequest":
+                return JSONResponse({
+                    "version": "1.0",
+                    "response": {
+                        "outputSpeech": {
+                            "type": "PlainText",
+                            "text": "Bem-vindo ao Jarvis Assistente!"
+                        },
+                        "shouldEndSession": False
+                    }
+                })
+            
+            return JSONResponse({
+                "version": "1.0",
+                "response": {
+                    "outputSpeech": {
+                        "type": "PlainText",
+                        "text": "Requisição recebida com sucesso."
+                    },
+                    "shouldEndSession": False
+                }
+            })
+        except Exception as e:
+            raise HTTPException(status_code=400, detail="Invalid request")
+
+    app.include_router(alexa_router)
+
+    # Restaurar Bindings do SendBlue
     _restore_sendblue_bindings(app)
 
-    # Add security headers middleware
+    # Middleware de segurança
     try:
         from openjarvis.server.middleware import create_security_middleware
 
@@ -501,7 +452,7 @@ def create_app(
     except Exception as exc:
         logger.debug("Security middleware init skipped: %s", exc)
 
-    # API key authentication middleware
+    # Autenticação por API Key
     if api_key:
         try:
             from openjarvis.server.auth_middleware import AuthMiddleware
@@ -510,10 +461,7 @@ def create_app(
         except Exception as exc:
             logger.debug("Auth middleware init skipped: %s", exc)
 
-    # Register CORS last so it is the outermost middleware. In addition to
-    # handling preflights, this ensures browser clients can read 401 responses
-    # produced directly by AuthMiddleware instead of seeing an opaque CORS
-    # network error.
+    # CORS
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_origins,
@@ -522,12 +470,10 @@ def create_app(
         allow_headers=["*"],
     )
 
-    # Mount webhook routes (always — SendBlue may be configured dynamically)
+    # Webhooks
     if webhook_config:
         try:
-            from openjarvis.server.webhook_routes import (
-                create_webhook_router,
-            )
+            from openjarvis.server.webhook_routes import create_webhook_router
 
             webhook_router = create_webhook_router(
                 bridge=channel_bridge,
@@ -540,7 +486,7 @@ def create_app(
         except Exception as exc:
             logger.debug("Webhook routes init skipped: %s", exc)
 
-    # Serve static frontend assets if the static/ directory exists
+    # Arquivos estáticos e SPA catch-all (deve vir após rotas específicas como /api/alexa)
     static_dir = pathlib.Path(__file__).parent / "static"
     if static_dir.is_dir():
         assets_dir = static_dir / "assets"
@@ -553,10 +499,8 @@ def create_app(
 
         @app.get("/{full_path:path}")
         async def spa_catch_all(full_path: str):
-            """Serve static files directly, fall back to index.html for SPA routes."""
             if full_path:
                 candidate = (static_dir / full_path).resolve()
-                # Path traversal prevention
                 resolved_root = static_dir.resolve()
                 if candidate.is_relative_to(resolved_root) and candidate.is_file():
                     return FileResponse(candidate, headers=_NO_CACHE_HEADERS)
@@ -564,81 +508,6 @@ def create_app(
                 static_dir / "index.html",
                 headers=_NO_CACHE_HEADERS,
             )
-
- 
-
-        @app.post("/api/alexa")
-        async def alexa_webhook(request: Request):
-            try:
-                # Pega o payload enviado pela Alexa
-                payload = await request.json()
-                
-                # Aqui você insere a lógica para processar o request da Alexa
-                # Por enquanto, estamos apenas validando e retornando uma resposta vazia
-                request_type = payload.get("request", {}).get("type")
-                
-                if request_type == "LaunchRequest":
-                    # Exemplo de resposta para início da skill
-                    return JSONResponse({
-                        "version": "1.0",
-                        "response": {
-                            "outputSpeech": {
-                                "type": "PlainText",
-                                "text": "Bem-vindo ao Jarvis Assistente!"
-                            },
-                            "shouldEndSession": False
-                        }
-                    })
-                
-          # Caso genérico ou outras intenções
-        try:
-            # Código que pode gerar exceção (ex: leitura do payload, etc.)
-            payload = await request.json()
-            # ...
-            return JSONResponse({
-                "version": "1.0",
-                "response": { ... }
-    })
-
-        except Exception as e:
-            raise HTTPException(status_code=400, detail="Invalid request")
-# Adicione o APIRouter para a Alexa aqui
-
-
-        @alexa_router.post("/api/alexa")
-        async def alexa_webhook(request: Request):
-            try:
-                # Pega o payload enviado pela Alexa
-                payload = await request.json()
-                
-                request_type = payload.get("request", {}).get("type")
-                
-                if request_type == "LaunchRequest":
-                    return JSONResponse({
-                        "version": "1.0",
-                        "response": {
-                            "outputSpeech": {
-                                "type": "PlainText",
-                                "text": "Bem-vindo ao Jarvis Assistente!"
-                            },
-                            "shouldEndSession": False
-                        }
-                    })
-                
-                return JSONResponse({
-                    "version": "1.0",
-                    "response": {
-                        "outputSpeech": {
-                            "type": "PlainText",
-                            "text": "Requisição recebida com sucesso."
-                        },
-                        "shouldEndSession": False
-                    }
-                })
-            except Exception as e:
-                raise HTTPException(status_code=400, detail="Invalid request")
-
-        app.include_router(alexa_router)
 
     return app
 
