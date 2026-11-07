@@ -34,18 +34,12 @@ _MANAGED_SHUTDOWN_DRAIN_SECONDS = 10.0
 
 
 def _restore_sendblue_bindings(app: FastAPI) -> None:
-    """Restore SendBlue channel bindings from the database on startup.
-
-    If a SendBlue binding was created via the Messaging tab and the server
-    restarts, this ensures the ChannelBridge + DeepResearchAgent are wired
-    up so incoming webhooks continue to work.
-    """
+    """Restore SendBlue channel bindings from the database on startup."""
     try:
         mgr = getattr(app.state, "agent_manager", None)
         if mgr is None:
             return
 
-        # Check all agents for sendblue bindings
         for agent in mgr.list_agents():
             agent_id = agent.get("id", agent.get("agent_id", ""))
             bindings = mgr.list_channel_bindings(agent_id)
@@ -69,7 +63,6 @@ def _restore_sendblue_bindings(app: FastAPI) -> None:
                 sb.connect()
                 app.state.sendblue_channel = sb
 
-                # Create ChannelBridge if none exists
                 bridge = getattr(app.state, "channel_bridge", None)
                 if bridge and hasattr(bridge, "_channels"):
                     bridge._channels["sendblue"] = sb
@@ -124,7 +117,7 @@ def _restore_sendblue_bindings(app: FastAPI) -> None:
                     "Restored SendBlue channel binding: %s",
                     from_number,
                 )
-                return  # Only need one SendBlue binding
+                return
     except Exception as exc:
         logger.debug("SendBlue binding restore skipped: %s", exc)
 
@@ -144,7 +137,6 @@ class _NoCacheStaticFiles(StaticFiles):
         async def _send_with_headers(message):
             if message["type"] == "http.response.start":
                 extra = [(k.encode(), v.encode()) for k, v in _NO_CACHE_HEADERS.items()]
-                # Remove etag and last-modified
                 existing = [
                     (k, v)
                     for k, v in message.get("headers", [])
@@ -181,23 +173,7 @@ def create_app(
     webhook_config: dict | None = None,
     cors_origins: list[str] | None = None,
 ) -> FastAPI:
-    """Create and configure the FastAPI application.
-
-    Parameters
-    ----------
-    engine:
-        The inference engine to use for completions.
-    model:
-        Default model name.
-    agent:
-        Optional agent instance for agent-mode completions.
-    bus:
-        Optional event bus for telemetry.
-    channel_bridge:
-        Optional channel bridge for multi-platform messaging.
-    config:
-        Optional JarvisConfig for other settings.
-    """
+    """Create and configure the FastAPI application."""
     original_engine = engine
     security_enabled = config is not None and getattr(
         getattr(config, "security", None), "enabled", False
@@ -290,7 +266,7 @@ def create_app(
     app.state._mcp_clients_lock = threading.Lock()
     app.state._mcp_clients = list(mcp_clients or [])
     app.state._managed_worker_lock = threading.Lock()
-    app.state._managed_workers = set()
+    app.state._managed_workers: set[threading.Thread] = set()
     app.state._managed_runtime_stopping = False
     app.state.session_start = time.time()
     app.state.api_key = api_key
@@ -312,267 +288,3 @@ def create_app(
         def _join_workers(timeout: float) -> None:
             deadline = time.monotonic() + timeout
             for thread in managed_workers:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                thread.join(timeout=remaining)
-
-        scheduler = getattr(app.state, "agent_scheduler", None)
-        scheduler_wait = None
-        scheduler_drained = True
-        if scheduler is not None:
-            try:
-                request_stop = getattr(scheduler, "request_stop", None)
-                wait_stopped = getattr(scheduler, "wait_stopped", None)
-                if callable(request_stop) and callable(wait_stopped):
-                    request_stop()
-                    scheduler_wait = wait_stopped
-                    scheduler_drained = bool(
-                        wait_stopped(timeout=_MANAGED_SHUTDOWN_GRACE_SECONDS)
-                    )
-                else:
-                    scheduler.stop()
-                    scheduler_drained = not bool(
-                        getattr(scheduler, "is_running", False)
-                    )
-            except Exception:
-                scheduler_drained = False
-                logger.debug("Agent scheduler shutdown failed", exc_info=True)
-
-        _join_workers(timeout=_MANAGED_SHUTDOWN_GRACE_SECONDS)
-        with app.state._mcp_clients_lock:
-            mcp_clients_to_close = list(app.state._mcp_clients)
-        for client in mcp_clients_to_close:
-            try:
-                client.close()
-            except Exception:
-                logger.debug("MCP client shutdown failed", exc_info=True)
-
-        if scheduler_wait is not None:
-            try:
-                scheduler_drained = bool(
-                    scheduler_wait(timeout=_MANAGED_SHUTDOWN_DRAIN_SECONDS)
-                )
-            except Exception:
-                scheduler_drained = False
-                logger.debug("Agent scheduler drain failed", exc_info=True)
-        _join_workers(timeout=_MANAGED_SHUTDOWN_DRAIN_SECONDS)
-        alive = [thread.name for thread in managed_workers if thread.is_alive()]
-        if alive:
-            logger.warning("Managed workers did not stop during shutdown: %s", alive)
-
-        owned_memory_backend = None
-        runtime_drained = scheduler_drained and not alive
-        if runtime_drained:
-            with app.state._memory_backend_lock:
-                if app.state._owns_memory_backend:
-                    owned_memory_backend = app.state.memory_backend
-                    app.state.memory_backend = None
-                    app.state._owns_memory_backend = False
-        else:
-            logger.warning(
-                "Skipping memory backend cleanup because managed runtime "
-                "consumers did not stop"
-            )
-        close_memory = getattr(owned_memory_backend, "close", None)
-        if callable(close_memory):
-            try:
-                close_memory()
-            except Exception:
-                logger.debug("Memory backend shutdown failed", exc_info=True)
-
-    app.state.trace_store = None
-    try:
-        from openjarvis.core.config import load_config
-        from openjarvis.traces.store import TraceStore
-
-        cfg = config if config is not None else load_config()
-        if cfg.traces.enabled:
-            app.state.trace_store = TraceStore(db_path=cfg.traces.db_path)
-    except Exception:
-        pass
-
-    app.state.analytics_client = None
-    app.state.analytics_bridge = None
-    try:
-        from openjarvis.core.config import load_config
-
-        _cfg = config if config is not None else load_config()
-        configure_analytics(app, _cfg)
-    except Exception as _exc:
-        logger.debug("Analytics init skipped: %s", _exc)
-
-    @app.on_event("shutdown")
-    async def _shutdown_analytics() -> None:
-        stop_analytics(app)
-
-    if memory_service is not None:
-        @app.on_event("shutdown")
-        async def _shutdown_memory_service() -> None:
-            svc = getattr(app.state, "memory_service", None)
-            if svc is not None:
-                try:
-                    svc.stop()
-                except Exception:
-                    pass
-
-    app.include_router(router)
-    app.include_router(dashboard_router)
-    app.include_router(comparison_router)
-    app.include_router(create_connectors_router())
-    app.include_router(create_digest_router())
-    app.include_router(upload_router)
-    app.include_router(research_router)
-    app.include_router(analytics_router)
-    include_all_routes(app)
-
-    # Roteador da Alexa integrado ao OpenJarvis AI
-    alexa_router = APIRouter()
-
-    @alexa_router.post("/api/alexa")
-    async def alexa_webhook(request: Request):
-        try:
-            payload = await request.json()
-            req = payload.get("request", {})
-            request_type = req.get("type")
-            
-            if request_type == "LaunchRequest":
-                return JSONResponse({
-                    "version": "1.0",
-                    "response": {
-                        "outputSpeech": {
-                            "type": "PlainText",
-                            "text": "Jarvis online e conectado à inteligência artificial. O que você deseja?"
-                        },
-                        "shouldEndSession": False
-                    }
-                })
-            
-            if request_type == "IntentRequest":
-                intent = req.get("intent", {})
-                slots = intent.get("slots", {})
-                
-                query = None
-                for slot_data in slots.values():
-                    if isinstance(slot_data, dict) and slot_data.get("value"):
-                        query = slot_data.get("value")
-                        break
-                
-                if not query:
-                    query = intent.get("name", "comando geral")
-                
-                engine = getattr(request.app.state, "engine", None)
-                agent = getattr(request.app.state, "agent", None)
-                
-                ai_text = None
-                try:
-                    if agent and hasattr(agent, "run"):
-                        ai_text = agent.run(query)
-                    elif engine and hasattr(engine, "generate"):
-                        ai_text = engine.generate(query)
-                    elif engine and hasattr(engine, "chat"):
-                        ai_text = engine.chat(query)
-                    else:
-                        ai_text = f"Comando {query} recebido pelo OpenJarvis."
-                except Exception:
-                    ai_text = f"Processado com sucesso: {query}"
-                
-                if not isinstance(ai_text, str):
-                    ai_text = str(ai_text)
-                
-                return JSONResponse({
-                    "version": "1.0",
-                    "response": {
-                        "outputSpeech": {
-                            "type": "PlainText",
-                            "text": ai_text
-                        },
-                        "shouldEndSession": False
-                    }
-                })
-
-            return JSONResponse({
-                "version": "1.0",
-                "response": {
-                    "outputSpeech": {
-                        "type": "PlainText",
-                        "text": "Requisição recebida pelo OpenJarvis."
-                    },
-                    "shouldEndSession": False
-                }
-            })
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-    app.include_router(alexa_router)
-
-    # Restore SendBlue channel bindings from database on startup
-    _restore_sendblue_bindings(app)
-
-    try:
-        from openjarvis.server.middleware import create_security_middleware
-
-        middleware_cls = create_security_middleware()
-        if middleware_cls is not None:
-            app.add_middleware(middleware_cls)
-    except Exception as exc:
-        logger.debug("Security middleware init skipped: %s", exc)
-
-    if api_key:
-        try:
-            from openjarvis.server.auth_middleware import AuthMiddleware
-
-            app.add_middleware(AuthMiddleware, api_key=api_key)
-        except Exception as exc:
-            logger.debug("Auth middleware init skipped: %s", exc)
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    if webhook_config:
-        try:
-            from openjarvis.server.webhook_routes import (
-                create_webhook_router,
-            )
-
-            webhook_router = create_webhook_router(
-                bridge=channel_bridge,
-                twilio_auth_token=webhook_config.get("twilio_auth_token", ""),
-                bluebubbles_password=webhook_config.get("bluebubbles_password", ""),
-                whatsapp_verify_token=webhook_config.get("whatsapp_verify_token", ""),
-                whatsapp_app_secret=webhook_config.get("whatsapp_app_secret", ""),
-            )
-            app.include_router(webhook_router)
-        except Exception as exc:
-            logger.debug("Webhook routes init skipped: %s", exc)
-
-    static_dir = pathlib.Path(__file__).parent / "static"
-    if static_dir.is_dir():
-        assets_dir = static_dir / "assets"
-        if assets_dir.is_dir():
-            app.mount(
-                "/assets",
-                _NoCacheStaticFiles(directory=assets_dir),
-                name="static-assets",
-            )
-
-        @app.get("/{full_path:path}")
-        async def spa_catch_all(full_path: str):
-            if full_path:
-                candidate = (static_dir / full_path).resolve()
-                resolved_root = static_dir.resolve()
-                if candidate.is_relative_to(resolved_root) and candidate.is_file():
-                    return FileResponse(candidate, headers=_NO_CACHE_HEADERS)
-            return FileResponse(
-                static_dir / "index.html",
-                headers=_NO_CACHE_HEADERS,
-            )
-
-    return app
-
-__all__ = ["create_app"]
