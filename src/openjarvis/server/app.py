@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import pathlib
 import threading
 import time
 
-from fastapi import FastAPI, APIRouter, Request, HTTPException
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -240,7 +241,7 @@ def create_app(
             "https://tauri.localhost",
         ]
     _origins = [o for o in _origins if o != "*"]
-    
+
     app.state.engine = engine
     app.state.model = model
     app.state.agent = agent
@@ -402,85 +403,159 @@ def create_app(
     app.include_router(research_router)
     app.include_router(analytics_router)
     include_all_routes(app)
-    
+
     _restore_sendblue_bindings(app)
 
-    # 1. REGISTRAR O ROTEADOR DA ALEXA PRIMEIRO (antes dos arquivos estáticos e catch-all)
+    # 1. REGISTRAR O ROTEADOR DA ALEXA PRIMEIRO (antes dos arquivos
+    # estáticos e catch-all)
     alexa_router = APIRouter()
+
+    def _verify_alexa_request(headers: dict[str, str], body: bytes) -> dict:
+        """Verify Alexa's signature and freshness with the official ASK SDK."""
+        from ask_sdk_core.serialize import DefaultSerializer
+        from ask_sdk_model import RequestEnvelope
+        from ask_sdk_webservice_support.verifier import (
+            RequestVerifier,
+            TimestampVerifier,
+        )
+
+        raw_body = body.decode("utf-8")
+        envelope = DefaultSerializer().deserialize(
+            payload=raw_body, obj_type=RequestEnvelope
+        )
+        RequestVerifier().verify(headers, raw_body, envelope)
+        TimestampVerifier().verify(headers, raw_body, envelope)
+        expected_application_id = os.environ.get(
+            "ALEXA_SKILL_APPLICATION_ID", ""
+        ).strip()
+        if not expected_application_id:
+            raise ValueError("ALEXA_SKILL_APPLICATION_ID is not configured")
+
+        # The SDK deserializes RequestEnvelope as a model, while nested
+        # application data can remain dictionaries with JSON camelCase keys.
+        def _sdk_value(container, attribute: str, json_key: str):
+            if isinstance(container, dict):
+                return container.get(json_key, container.get(attribute))
+            return getattr(container, attribute, None)
+
+        # Alexa uses session.application for session requests and
+        # context.system.application for requests without a session.
+        session = getattr(envelope, "session", None)
+        application = _sdk_value(session, "application", "application")
+        received_application_id = _sdk_value(
+            application, "application_id", "applicationId"
+        )
+        if not received_application_id:
+            context = getattr(envelope, "context", None)
+            system = _sdk_value(context, "system", "system")
+            application = _sdk_value(system, "application", "application")
+            received_application_id = _sdk_value(
+                application, "application_id", "applicationId"
+            )
+        if received_application_id != expected_application_id:
+            raise ValueError("Alexa application ID does not match")
+
+        return json.loads(raw_body)
 
     @alexa_router.post("/api/alexa")
     async def alexa_webhook(request: Request):
         try:
             try:
-                payload = await request.json()
+                raw_body = await request.body()
+                payload = _verify_alexa_request(dict(request.headers), raw_body)
             except Exception:
-                payload = {}
-                
-            logger.info(f"ALEXA PAYLOAD RECEBIDO: {payload}")
-            
+                return JSONResponse(
+                    {"detail": "Invalid Alexa request"}, status_code=400
+                )
+
+            logger.info(
+                "Verified Alexa request received (type=%s)",
+                payload.get("request", {}).get("type", "unknown"),
+            )
+
             req = payload.get("request", {})
             request_type = req.get("type", "LaunchRequest")
-            
+
             speech_text = "Jarvis online."
-            
+
             if request_type == "LaunchRequest":
                 speech_text = "Jarvis conectado e pronto. O que você deseja?"
-                
+
             elif request_type == "IntentRequest":
                 intent = req.get("intent", {})
                 intent_name = intent.get("name", "")
                 slots = intent.get("slots", {})
-                
+
                 query = ""
                 for slot_data in slots.values():
                     if isinstance(slot_data, dict) and slot_data.get("value"):
                         query = slot_data.get("value")
                         break
-                
+
                 if not query:
                     query = intent_name.replace("Intent", "").strip() or "olá"
-                
+
                 try:
                     engine = getattr(request.app.state, "engine", None)
                     agent = getattr(request.app.state, "agent", None)
-                    
+
                     # Interage corretamente com o modelo e o motor de chat do OpenJarvis
                     if agent and hasattr(agent, "run"):
                         res = agent.run(query)
-                        speech_text = res.get("content", str(res)) if isinstance(res, dict) else str(res)
+                        speech_text = (
+                            res.get("content", str(res))
+                            if isinstance(res, dict)
+                            else str(res)
+                        )
                     elif engine:
-                        # Prepara as mensagens no formato compatível com o engine do OpenJarvis
+                        # Prepara as mensagens no formato compatível com o
+                        # engine do OpenJarvis.
                         messages = [{"role": "user", "content": query}]
-                        model_name = getattr(request.app.state, "model", "01-ai/yi-large")
-                        
+                        model_name = getattr(
+                            request.app.state, "model", "01-ai/yi-large"
+                        )
+
                         if hasattr(engine, "chat"):
                             res = engine.chat(model=model_name, messages=messages)
                         elif hasattr(engine, "generate"):
                             res = engine.generate(query)
                         else:
                             res = str(query)
-                            
+
                         if isinstance(res, dict):
-                            # Tenta extrair a resposta de diferentes estruturas padrão de LLM
+                            # Tenta extrair a resposta de diferentes estruturas
+                            # padrão de LLM.
                             speech_text = (
-                                res.get("content") 
-                                or res.get("message", {}).get("content") 
-                                or res.get("text") 
+                                res.get("content")
+                                or res.get("message", {}).get("content")
+                                or res.get("text")
                                 or str(res)
                             )
                         else:
                             speech_text = str(res)
                     else:
-                        speech_text = f"Comando recebido: {query}"
+                        speech_text = (
+                            "N\u00e3o consegui executar esse comando porque a IA "
+                            "n\u00e3o est\u00e1 dispon\u00edvel."
+                        )
                 except Exception as ai_err:
-                    logger.error(f"Erro ao consultar IA no OpenJarvis: {ai_err}", exc_info=True)
-                    speech_text = f"Processado com sucesso: {query}"
-            
+                    logger.error(
+                        "Alexa intent processing failed in the AI layer (%s)",
+                        type(ai_err).__name__,
+                    )
+                    speech_text = (
+                        "N\u00e3o consegui executar esse comando. "
+                        "Tente novamente mais tarde."
+                    )
+
             elif request_type == "SessionEndedRequest":
-                speech_text = "Até logo."
-                
+                return JSONResponse({
+                    "version": "1.0",
+                    "response": {"shouldEndSession": True},
+                })
+
             if not speech_text:
-                speech_text = "Comando processado com sucesso."
+                speech_text = "N\u00e3o consegui processar esse comando."
 
             return JSONResponse({
                 "version": "1.0",
@@ -492,16 +567,22 @@ def create_app(
                     "shouldEndSession": False
                 }
             })
-        except Exception as e:
-            logger.error(f"Erro crítico no webhook da Alexa: {e}", exc_info=True)
+        except Exception as exc:
+            logger.error(
+                "Unexpected failure while handling Alexa request (%s)",
+                type(exc).__name__,
+            )
             return JSONResponse({
                 "version": "1.0",
                 "response": {
                     "outputSpeech": {
                         "type": "PlainText",
-                        "text": "Jarvis online. Pode falar o seu comando."
+                        "text": (
+                            "Ocorreu um erro ao processar sua solicita\u00e7\u00e3o. "
+                            "Tente novamente mais tarde."
+                        )
                     },
-                    "shouldEndSession": False
+                    "shouldEndSession": True
                 }
             })
 

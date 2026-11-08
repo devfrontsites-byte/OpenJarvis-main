@@ -28,6 +28,14 @@ def _make_app(api_key: str) -> FastAPI:
     async def twilio_webhook():
         return {"status": "received"}
 
+    @app.post("/api/alexa")
+    async def alexa_webhook():
+        return {"status": "received"}
+
+    @app.get("/api/private")
+    async def private_api():
+        return {"status": "private"}
+
     @app.get("/metrics")
     async def metrics():
         return {"requests": 0}
@@ -68,6 +76,15 @@ class TestAuthMiddleware:
     def test_webhooks_exempt(self, client):
         resp = client.post("/webhooks/twilio")
         assert resp.status_code == 200
+
+    def test_alexa_post_is_exempt_for_its_own_signature_validation(self, client):
+        assert client.post("/api/alexa").status_code == 200
+
+    def test_other_api_routes_still_require_auth(self, client):
+        assert client.get("/api/private").status_code == 401
+
+    def test_non_post_alexa_path_still_requires_auth(self, client):
+        assert client.get("/api/alexa").status_code == 401
 
     def test_metrics_requires_auth(self, client):
         resp = client.get("/metrics")

@@ -46,7 +46,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # preflight is identified by both headers required by the CORS protocol.
         if self._is_cors_preflight(request):
             return await call_next(request)
-        if self._api_key and self._requires_auth(request.url.path):
+        if (
+            self._api_key
+            and self._requires_auth(request.url.path)
+            and not (request.method == "POST" and request.url.path == "/api/alexa")
+        ):
             auth = request.headers.get("Authorization", "")
             if not auth:
                 return JSONResponse(
