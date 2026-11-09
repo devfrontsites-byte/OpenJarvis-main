@@ -544,7 +544,7 @@ def create_app(
                     engine = getattr(request.app.state, "engine", None)
                     agent = getattr(request.app.state, "agent", None)
 
-                    # Interage corretamente com o modelo e o motor de chat do OpenJarvis.
+                    # Interage o modelo e o motor de chat do OpenJarvis.
                     if agent and hasattr(agent, "run"):
                         res = agent.run(query)
                         result_content = (
