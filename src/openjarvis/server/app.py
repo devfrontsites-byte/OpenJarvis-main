@@ -383,7 +383,7 @@ def create_app(
         stop_analytics(app)
 
     if memory_service is not None:
-        
+
         @app.on_event("shutdown")
         async def _shutdown_memory_service() -> None:
             svc = getattr(app.state, "memory_service", None)
