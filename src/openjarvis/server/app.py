@@ -628,7 +628,8 @@ def create_app(
                 "Unexpected failure while handling Alexa request (%s)",
                 type(exc).__name__,
             )
-            return JSONResponse({
+            return JSONResponse(
+                {
                 "version": "1.0",
                 "response": {
                     "outputSpeech": {
@@ -636,11 +637,12 @@ def create_app(
                         "text": (
                             "Ocorreu um erro ao processar sua solicita\u00e7\u00e3o. "
                             "Tente novamente mais tarde."
-                        )
+                        ),
                     },
-                    "shouldEndSession": True
-                }
-            })
+                    "shouldEndSession": True,
+                },
+            }
+        )
 
     app.include_router(alexa_router)
 
