@@ -384,6 +384,7 @@ def create_app(
         stop_analytics(app)
 
     if memory_service is not None:
+        
         @app.on_event("shutdown")
         async def _shutdown_memory_service() -> None:
             svc = getattr(app.state, "memory_service", None)
@@ -600,24 +601,28 @@ def create_app(
                     )
 
             elif request_type == "SessionEndedRequest":
-                return JSONResponse({
-                    "version": "1.0",
-                    "response": {"shouldEndSession": True},
-                })
+                return JSONResponse(
+                    {
+                        "version": "1.0",
+                        "response": {"shouldEndSession": True},
+                    }
+                )
 
             if not speech_text:
                 speech_text = "N\u00e3o consegui processar esse comando."
 
-            return JSONResponse({
-                "version": "1.0",
-                "response": {
-                    "outputSpeech": {
-                        "type": "PlainText",
-                        "text": str(speech_text)
+            return JSONResponse(
+                {
+                    "version": "1.0",
+                    "response": {
+                        "outputSpeech": {
+                            "type": "PlainText",
+                            "text": str(speech_text)
                     },
                     "shouldEndSession": False
-                }
-            })
+                },
+            }
+        )
         except Exception as exc:
             logger.error(
                 "Unexpected failure while handling Alexa request (%s)",
