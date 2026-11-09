@@ -1,3 +1,4 @@
+
 """Security and response regressions for the Alexa webhook."""
 
 from __future__ import annotations
@@ -115,7 +116,9 @@ def test_alexa_without_signature_is_rejected_before_processing():
 
 def test_malformed_json_is_reported_as_json_stage(caplog):
     response = TestClient(_app()).post(
-        "/api/alexa", content=b"{not-json", headers={"Content-Type": "application/json"}
+        "/api/alexa",
+        content=b"{not-json",
+        headers={"Content-Type": "application/json"},
     )
 
     assert response.status_code == 400
@@ -361,7 +364,7 @@ def test_non_string_agent_result_content_uses_safe_fallback(
 
 
 def test_valid_signature_with_wrong_application_id_is_rejected(
-    signed_alexa_request, caplog,
+    signed_alexa_request, caplog
 ):
     body = _body().replace("test-skill-id", "another-skill-id")
     response = TestClient(_app()).post(
