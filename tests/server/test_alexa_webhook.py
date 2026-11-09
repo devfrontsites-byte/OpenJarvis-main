@@ -428,7 +428,7 @@ def test_ai_failure_does_not_claim_command_succeeded(signed_alexa_request, caplo
 
 def test_request_logs_do_not_include_user_speech(signed_alexa_request, caplog):
     private_speech = "frase privada de teste"
-    body = _body("IntentRequest").replace("\"oi\"", json.dumps(private_speech))
+    body = _body("IntentRequest").replace('"oi"', json.dumps(private_speech))
 
     response = TestClient(_app()).post(
         "/api/alexa", content=body, headers=signed_alexa_request(body)
