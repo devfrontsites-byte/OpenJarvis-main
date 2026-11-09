@@ -17,9 +17,7 @@ from openjarvis.server.analytics_routes import (
     configure_analytics,
     stop_analytics,
 )
-from openjarvis.server.analytics_routes import (
-    router as analytics_router,
-)
+from openjarvis.server.analytics_routes import router as analytics_router
 from openjarvis.server.api_routes import include_all_routes
 from openjarvis.server.comparison import comparison_router
 from openjarvis.server.connectors_router import create_connectors_router
@@ -47,6 +45,7 @@ def _restore_sendblue_bindings(app: FastAPI) -> None:
             for b in bindings:
                 if b.get("channel_type") != "sendblue":
                     continue
+
                 config = b.get("config", {})
                 api_key_id = config.get("api_key_id", "")
                 api_secret_key = config.get("api_secret_key", "")
@@ -96,7 +95,9 @@ def _restore_sendblue_bindings(app: FastAPI) -> None:
                                 capability_policy=getattr(
                                     app.state, "capability_policy", None
                                 ),
-                                rate_limiter=getattr(app.state, "rate_limiter", None),
+                                rate_limiter=getattr(
+                                    app.state, "rate_limiter", None
+                                ),
                                 agent_id=agent_id,
                             )
 
@@ -407,8 +408,7 @@ def create_app(
 
     _restore_sendblue_bindings(app)
 
-    # 1. REGISTRAR O ROTEADOR DA ALEXA PRIMEIRO (antes dos arquivos
-    # estáticos e catch-all)
+    # Registrar o roteador da Alexa antes dos arquivos estáticos e catch-all.
     alexa_router = APIRouter()
 
     class _AlexaValidationError(ValueError):
@@ -445,10 +445,12 @@ def create_app(
             RequestVerifier().verify(headers, raw_body, envelope)
         except Exception as exc:
             raise _AlexaValidationError("signature", type(exc).__name__) from exc
+
         try:
             TimestampVerifier().verify(headers, raw_body, envelope)
         except Exception as exc:
             raise _AlexaValidationError("timestamp", type(exc).__name__) from exc
+
         expected_application_id = os.environ.get(
             "ALEXA_SKILL_APPLICATION_ID", ""
         ).strip()
@@ -542,7 +544,7 @@ def create_app(
                     engine = getattr(request.app.state, "engine", None)
                     agent = getattr(request.app.state, "agent", None)
 
-                    # Interage corretamente com o modelo e o motor de chat do OpenJarvis
+                    # Interage corretamente com o modelo e o motor de chat do OpenJarvis.
                     if agent and hasattr(agent, "run"):
                         res = agent.run(query)
                         result_content = (
@@ -587,8 +589,8 @@ def create_app(
                             speech_text = str(res)
                     else:
                         speech_text = (
-                            "N\u00e3o consegui executar esse comando porque a IA "
-                            "n\u00e3o est\u00e1 dispon\u00edvel."
+                            "Não consegui executar esse comando porque a IA "
+                            "não está disponível."
                         )
                 except Exception as ai_err:
                     logger.error(
@@ -596,7 +598,7 @@ def create_app(
                         type(ai_err).__name__,
                     )
                     speech_text = (
-                        "N\u00e3o consegui executar esse comando. "
+                        "Não consegui executar esse comando. "
                         "Tente novamente mais tarde."
                     )
 
@@ -609,7 +611,7 @@ def create_app(
                 )
 
             if not speech_text:
-                speech_text = "N\u00e3o consegui processar esse comando."
+                speech_text = "Não consegui processar esse comando."
 
             return JSONResponse(
                 {
@@ -617,12 +619,12 @@ def create_app(
                     "response": {
                         "outputSpeech": {
                             "type": "PlainText",
-                            "text": str(speech_text)
+                            "text": str(speech_text),
+                        },
+                        "shouldEndSession": False,
                     },
-                    "shouldEndSession": False
-                },
-            }
-        )
+                }
+            )
         except Exception as exc:
             logger.error(
                 "Unexpected failure while handling Alexa request (%s)",
@@ -630,19 +632,19 @@ def create_app(
             )
             return JSONResponse(
                 {
-                "version": "1.0",
-                "response": {
-                    "outputSpeech": {
-                        "type": "PlainText",
-                        "text": (
-                            "Ocorreu um erro ao processar sua solicita\u00e7\u00e3o. "
-                            "Tente novamente mais tarde."
-                        ),
+                    "version": "1.0",
+                    "response": {
+                        "outputSpeech": {
+                            "type": "PlainText",
+                            "text": (
+                                "Ocorreu um erro ao processar sua solicitação. "
+                                "Tente novamente mais tarde."
+                            ),
+                        },
+                        "shouldEndSession": True,
                     },
-                    "shouldEndSession": True,
-                },
-            }
-        )
+                }
+            )
 
     app.include_router(alexa_router)
 
@@ -689,7 +691,7 @@ def create_app(
         except Exception as exc:
             logger.debug("Webhook routes init skipped: %s", exc)
 
-    # 2. ARQUIVOS ESTÁTICOS E SPA CATCH-ALL DEVEM FICAR POR ÚLTIMO
+    # Arquivos estáticos e SPA catch-all devem ficar por último.
     static_dir = pathlib.Path(__file__).parent / "static"
     if static_dir.is_dir():
         assets_dir = static_dir / "assets"
