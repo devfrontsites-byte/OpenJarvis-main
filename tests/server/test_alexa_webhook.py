@@ -154,6 +154,39 @@ def test_invalid_signature_logs_only_validation_stage(signed_alexa_request, capl
     assert "secret-signature-value" not in caplog.text
 
 
+def test_unexpected_signature_exception_logs_class_and_stage(
+    signed_alexa_request, monkeypatch, caplog
+):
+    from ask_sdk_webservice_support.verifier import RequestVerifier
+
+    def fail_verification(self, headers, raw_body, envelope):
+        raise RuntimeError("private-verifier-detail")
+
+    monkeypatch.setattr(RequestVerifier, "verify", fail_verification)
+    body = _body()
+    response = TestClient(_app()).post(
+        "/api/alexa", content=body, headers=signed_alexa_request(body)
+    )
+
+    assert response.status_code == 400
+    assert "stage=signature exception=RuntimeError" in caplog.text
+    assert "private-verifier-detail" not in caplog.text
+
+
+def test_body_read_failure_logs_class_and_stage(monkeypatch, caplog):
+    import openjarvis.server.app as app_module
+
+    async def fail_body_read(self):
+        raise RuntimeError("private-body-read-detail")
+
+    monkeypatch.setattr(app_module.Request, "body", fail_body_read)
+    response = TestClient(_app()).post("/api/alexa", content=_body())
+
+    assert response.status_code == 400
+    assert "stage=body_read exception=RuntimeError" in caplog.text
+    assert "private-body-read-detail" not in caplog.text
+
+
 def test_body_tampering_after_signing_is_rejected(signed_alexa_request):
     original_body = _body("IntentRequest")
     headers = signed_alexa_request(original_body)
@@ -216,6 +249,126 @@ def test_valid_signature_reaches_handler_with_agent(signed_alexa_request):
     assert response.json()["response"]["outputSpeech"]["text"] == (
         "Resposta processada."
     )
+
+
+def test_agent_result_content_is_forwarded_to_alexa(signed_alexa_request):
+    from openjarvis.agents._stubs import AgentResult
+
+    class ResultAgent:
+        def __init__(self):
+            self.queries = []
+
+        def run(self, query):
+            self.queries.append(query)
+            return AgentResult(content="Resposta do AgentResult.", turns=1)
+
+    agent = ResultAgent()
+    body = _body("IntentRequest")
+    response = TestClient(_app(agent=agent)).post(
+        "/api/alexa", content=body, headers=signed_alexa_request(body)
+    )
+
+    assert response.status_code == 200
+    assert agent.queries == ["oi"]
+    assert response.json()["response"]["outputSpeech"]["text"] == (
+        "Resposta do AgentResult."
+    )
+
+
+def test_empty_agent_result_uses_fallback_without_speaking_metadata(
+    signed_alexa_request,
+):
+    from openjarvis.agents._stubs import AgentResult
+
+    class ResultAgent:
+        def run(self, query):
+            return AgentResult(
+                content="",
+                tool_results=["private-tool-result"],
+                metadata={"private-key": "private-metadata"},
+            )
+
+    body = _body("IntentRequest")
+    response = TestClient(_app(agent=ResultAgent())).post(
+        "/api/alexa", content=body, headers=signed_alexa_request(body)
+    )
+
+    assert response.status_code == 200
+    speech = response.json()["response"]["outputSpeech"]["text"]
+    assert speech == (
+        "Desculpe, não consegui gerar uma resposta agora. Pode tentar novamente?"
+    )
+    assert "private-tool-result" not in speech
+    assert "private-metadata" not in speech
+
+
+def test_agent_result_without_content_uses_fallback_not_object_repr(
+    signed_alexa_request,
+):
+    class ResultWithoutContent:
+        tool_results = ["private-tool-result"]
+        metadata = {"private-key": "private-metadata"}
+
+        def __repr__(self):
+            return "ResultWithoutContent(private-tool-result, private-metadata)"
+
+    class ResultAgent:
+        def run(self, query):
+            return ResultWithoutContent()
+
+    body = _body("IntentRequest")
+    response = TestClient(_app(agent=ResultAgent())).post(
+        "/api/alexa", content=body, headers=signed_alexa_request(body)
+    )
+
+    assert response.status_code == 200
+    speech = response.json()["response"]["outputSpeech"]["text"]
+    assert speech == (
+        "Desculpe, não consegui gerar uma resposta agora. Pode tentar novamente?"
+    )
+    assert "private-tool-result" not in speech
+    assert "private-metadata" not in speech
+
+
+@pytest.mark.parametrize(
+    "non_text_content",
+    [
+        {"private-content-key": "private-content-value"},
+        ["private-content-value"],
+    ],
+)
+def test_non_string_agent_result_content_uses_safe_fallback(
+    signed_alexa_request, caplog, non_text_content
+):
+    from openjarvis.agents._stubs import AgentResult
+
+    class ResultAgent:
+        def run(self, query):
+            return AgentResult(
+                content=non_text_content,
+                tool_results=["private-tool-result"],
+                metadata={"private-metadata-key": "private-metadata-value"},
+            )
+
+    body = _body("IntentRequest")
+    response = TestClient(_app(agent=ResultAgent())).post(
+        "/api/alexa", content=body, headers=signed_alexa_request(body)
+    )
+
+    assert response.status_code == 200
+    speech = response.json()["response"]["outputSpeech"]["text"]
+    assert speech == (
+        "Desculpe, não consegui gerar uma resposta agora. Pode tentar novamente?"
+    )
+    for private_value in (
+        "private-content-key",
+        "private-content-value",
+        "private-tool-result",
+        "private-metadata-key",
+        "private-metadata-value",
+    ):
+        assert private_value not in speech
+        assert private_value not in caplog.text
 
 
 def test_valid_signature_with_wrong_application_id_is_rejected(

@@ -411,18 +411,22 @@ def create_app(
     alexa_router = APIRouter()
 
     class _AlexaValidationError(ValueError):
-        def __init__(self, stage: str) -> None:
+        def __init__(self, stage: str, exception_class: str | None = None) -> None:
             super().__init__(stage)
             self.stage = stage
+            self.exception_class = exception_class or type(self).__name__
 
     def _verify_alexa_request(headers: dict[str, str], body: bytes) -> dict:
         """Verify Alexa's signature and freshness with the official ASK SDK."""
-        from ask_sdk_core.serialize import DefaultSerializer
-        from ask_sdk_model import RequestEnvelope
-        from ask_sdk_webservice_support.verifier import (
-            RequestVerifier,
-            TimestampVerifier,
-        )
+        try:
+            from ask_sdk_core.serialize import DefaultSerializer
+            from ask_sdk_model import RequestEnvelope
+            from ask_sdk_webservice_support.verifier import (
+                RequestVerifier,
+                TimestampVerifier,
+            )
+        except Exception as exc:
+            raise _AlexaValidationError("sdk_setup", type(exc).__name__) from exc
 
         try:
             raw_body = body.decode("utf-8")
@@ -431,7 +435,7 @@ def create_app(
             )
             payload = json.loads(raw_body)
         except Exception as exc:
-            raise _AlexaValidationError("json") from exc
+            raise _AlexaValidationError("json", type(exc).__name__) from exc
 
         # Starlette exposes a case-insensitive Headers mapping. ASK SDK also
         # resolves these two header names case-insensitively; converting the
@@ -439,58 +443,72 @@ def create_app(
         try:
             RequestVerifier().verify(headers, raw_body, envelope)
         except Exception as exc:
-            raise _AlexaValidationError("signature") from exc
+            raise _AlexaValidationError("signature", type(exc).__name__) from exc
         try:
             TimestampVerifier().verify(headers, raw_body, envelope)
         except Exception as exc:
-            raise _AlexaValidationError("timestamp") from exc
+            raise _AlexaValidationError("timestamp", type(exc).__name__) from exc
         expected_application_id = os.environ.get(
             "ALEXA_SKILL_APPLICATION_ID", ""
         ).strip()
-        if not expected_application_id:
-            raise _AlexaValidationError("skill_id")
+        try:
+            if not expected_application_id:
+                raise _AlexaValidationError("skill_id")
 
-        # The SDK deserializes RequestEnvelope as a model, while nested
-        # application data can remain dictionaries with JSON camelCase keys.
-        def _sdk_value(container, attribute: str, json_key: str):
-            if isinstance(container, dict):
-                return container.get(json_key, container.get(attribute))
-            return getattr(container, attribute, None)
+            # Nested application data can be model objects or JSON dictionaries.
+            def _sdk_value(container, attribute: str, json_key: str):
+                if isinstance(container, dict):
+                    return container.get(json_key, container.get(attribute))
+                return getattr(container, attribute, None)
 
-        # Alexa uses session.application for session requests and
-        # context.system.application for requests without a session.
-        session = getattr(envelope, "session", None)
-        application = _sdk_value(session, "application", "application")
-        received_application_id = _sdk_value(
-            application, "application_id", "applicationId"
-        )
-        if not received_application_id:
-            context = getattr(envelope, "context", None)
-            system = _sdk_value(context, "system", "system")
-            application = _sdk_value(system, "application", "application")
+            # Alexa uses session.application for session requests and
+            # context.system.application for requests without a session.
+            session = getattr(envelope, "session", None)
+            application = _sdk_value(session, "application", "application")
             received_application_id = _sdk_value(
                 application, "application_id", "applicationId"
             )
-        if received_application_id != expected_application_id:
-            raise _AlexaValidationError("skill_id")
+            if not received_application_id:
+                context = getattr(envelope, "context", None)
+                system = _sdk_value(context, "system", "system")
+                application = _sdk_value(system, "application", "application")
+                received_application_id = _sdk_value(
+                    application, "application_id", "applicationId"
+                )
+            if received_application_id != expected_application_id:
+                raise _AlexaValidationError("skill_id")
+        except _AlexaValidationError:
+            raise
+        except Exception as exc:
+            raise _AlexaValidationError("skill_id", type(exc).__name__) from exc
 
         return payload
 
     @alexa_router.post("/api/alexa")
     async def alexa_webhook(request: Request):
         try:
+            validation_stage = "body_read"
             try:
                 raw_body = await request.body()
-                payload = _verify_alexa_request(dict(request.headers), raw_body)
+                validation_stage = "header_mapping"
+                request_headers = dict(request.headers)
+                validation_stage = "ask_sdk_validation"
+                payload = _verify_alexa_request(request_headers, raw_body)
             except _AlexaValidationError as exc:
                 logger.warning(
-                    "Alexa request rejected (stage=%s)", exc.stage
+                    "Alexa request rejected (stage=%s exception=%s)",
+                    exc.stage,
+                    exc.exception_class,
                 )
                 return JSONResponse(
                     {"detail": "Invalid Alexa request"}, status_code=400
                 )
-            except Exception:
-                logger.warning("Alexa request rejected (stage=validation)")
+            except Exception as exc:
+                logger.warning(
+                    "Alexa request rejected (stage=%s exception=%s)",
+                    validation_stage,
+                    type(exc).__name__,
+                )
                 return JSONResponse(
                     {"detail": "Invalid Alexa request"}, status_code=400
                 )
@@ -526,10 +544,19 @@ def create_app(
                     # Interage corretamente com o modelo e o motor de chat do OpenJarvis
                     if agent and hasattr(agent, "run"):
                         res = agent.run(query)
-                        speech_text = (
-                            res.get("content", str(res))
+                        result_content = (
+                            res.get("content")
                             if isinstance(res, dict)
-                            else str(res)
+                            else getattr(res, "content", None)
+                        )
+                        speech_text = (
+                            result_content
+                            if isinstance(result_content, str)
+                            and result_content.strip()
+                            else (
+                                "Desculpe, não consegui gerar uma resposta agora. "
+                                "Pode tentar novamente?"
+                            )
                         )
                     elif engine:
                         # Prepara as mensagens no formato compatível com o
