@@ -410,6 +410,11 @@ def create_app(
     # estáticos e catch-all)
     alexa_router = APIRouter()
 
+    class _AlexaValidationError(ValueError):
+        def __init__(self, stage: str) -> None:
+            super().__init__(stage)
+            self.stage = stage
+
     def _verify_alexa_request(headers: dict[str, str], body: bytes) -> dict:
         """Verify Alexa's signature and freshness with the official ASK SDK."""
         from ask_sdk_core.serialize import DefaultSerializer
@@ -419,17 +424,31 @@ def create_app(
             TimestampVerifier,
         )
 
-        raw_body = body.decode("utf-8")
-        envelope = DefaultSerializer().deserialize(
-            payload=raw_body, obj_type=RequestEnvelope
-        )
-        RequestVerifier().verify(headers, raw_body, envelope)
-        TimestampVerifier().verify(headers, raw_body, envelope)
+        try:
+            raw_body = body.decode("utf-8")
+            envelope = DefaultSerializer().deserialize(
+                payload=raw_body, obj_type=RequestEnvelope
+            )
+            payload = json.loads(raw_body)
+        except Exception as exc:
+            raise _AlexaValidationError("json") from exc
+
+        # Starlette exposes a case-insensitive Headers mapping. ASK SDK also
+        # resolves these two header names case-insensitively; converting the
+        # mapping to dict preserves their lower-case names without breaking it.
+        try:
+            RequestVerifier().verify(headers, raw_body, envelope)
+        except Exception as exc:
+            raise _AlexaValidationError("signature") from exc
+        try:
+            TimestampVerifier().verify(headers, raw_body, envelope)
+        except Exception as exc:
+            raise _AlexaValidationError("timestamp") from exc
         expected_application_id = os.environ.get(
             "ALEXA_SKILL_APPLICATION_ID", ""
         ).strip()
         if not expected_application_id:
-            raise ValueError("ALEXA_SKILL_APPLICATION_ID is not configured")
+            raise _AlexaValidationError("skill_id")
 
         # The SDK deserializes RequestEnvelope as a model, while nested
         # application data can remain dictionaries with JSON camelCase keys.
@@ -453,9 +472,9 @@ def create_app(
                 application, "application_id", "applicationId"
             )
         if received_application_id != expected_application_id:
-            raise ValueError("Alexa application ID does not match")
+            raise _AlexaValidationError("skill_id")
 
-        return json.loads(raw_body)
+        return payload
 
     @alexa_router.post("/api/alexa")
     async def alexa_webhook(request: Request):
@@ -463,15 +482,20 @@ def create_app(
             try:
                 raw_body = await request.body()
                 payload = _verify_alexa_request(dict(request.headers), raw_body)
+            except _AlexaValidationError as exc:
+                logger.warning(
+                    "Alexa request rejected (stage=%s)", exc.stage
+                )
+                return JSONResponse(
+                    {"detail": "Invalid Alexa request"}, status_code=400
+                )
             except Exception:
+                logger.warning("Alexa request rejected (stage=validation)")
                 return JSONResponse(
                     {"detail": "Invalid Alexa request"}, status_code=400
                 )
 
-            logger.info(
-                "Verified Alexa request received (type=%s)",
-                payload.get("request", {}).get("type", "unknown"),
-            )
+            logger.info("Verified Alexa request received")
 
             req = payload.get("request", {})
             request_type = req.get("type", "LaunchRequest")
