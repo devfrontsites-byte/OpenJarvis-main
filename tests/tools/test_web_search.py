@@ -159,7 +159,17 @@ class TestWebSearchTool:
             return original_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", _mock_import)
-
+        mock_ddgs = MagicMock()
+        mock_ddgs.text.return_value = [
+            {
+                "title": "DDG Result",
+                "href": "https://example.com",
+                "body": "Test content",
+            }
+        ]
+        mock_ddgs_module = MagicMock()
+        mock_ddgs_module.DDGS.return_value = mock_ddgs
+        monkeypatch.setitem(sys.modules, "ddgs", mock_ddgs_module)
         tool = WebSearchTool(api_key="test-key")
         result = tool.execute(query="test query")
         assert result.success is True

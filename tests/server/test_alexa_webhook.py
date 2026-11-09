@@ -49,15 +49,10 @@ def _body(request_type="LaunchRequest", *, timestamp=None):
     return json.dumps(
         {
             "version": "1.0",
-            "context": {
-                "system": {
-                    "application": {"applicationId": "test-skill-id"}
-                }
-            },
+            "context": {"system": {"application": {"applicationId": "test-skill-id"}}},
             "request": {
                 "type": request_type,
-                "timestamp": timestamp
-                or datetime.now(timezone.utc).isoformat(),
+                "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
                 "requestId": "amzn1.echo-api.request.test",
                 "intent": {"name": "JarvisIntent", "slots": {"query": {"value": "oi"}}},
             },
@@ -120,7 +115,9 @@ def test_alexa_without_signature_is_rejected_before_processing():
 
 def test_malformed_json_is_reported_as_json_stage(caplog):
     response = TestClient(_app()).post(
-        "/api/alexa", content=b"{not-json", headers={"Content-Type": "application/json"}
+        "/api/alexa",
+        content=b"{not-json",
+        headers={"Content-Type": "application/json"},
     )
 
     assert response.status_code == 400
@@ -133,9 +130,7 @@ def test_invalid_signature_is_rejected(signed_alexa_request):
     headers = signed_alexa_request(body)
     headers["Signature-256"] = base64.b64encode(b"invalid signature").decode("ascii")
 
-    response = TestClient(_app()).post(
-        "/api/alexa", content=body, headers=headers
-    )
+    response = TestClient(_app()).post("/api/alexa", content=body, headers=headers)
 
     assert response.status_code == 400
 
@@ -145,9 +140,7 @@ def test_invalid_signature_logs_only_validation_stage(signed_alexa_request, capl
     headers = signed_alexa_request(body)
     headers["Signature-256"] = "secret-signature-value"
 
-    response = TestClient(_app()).post(
-        "/api/alexa", content=body, headers=headers
-    )
+    response = TestClient(_app()).post("/api/alexa", content=body, headers=headers)
 
     assert response.status_code == 400
     assert "stage=signature" in caplog.text
@@ -237,9 +230,7 @@ def test_valid_signature_reaches_handler_with_agent(signed_alexa_request):
     body = _body("IntentRequest")
     # ASGI frameworks normalize incoming header names to lower case. The ASK
     # SDK verifier must still find both required headers.
-    headers = {
-        key.lower(): value for key, value in signed_alexa_request(body).items()
-    }
+    headers = {key.lower(): value for key, value in signed_alexa_request(body).items()}
     response = TestClient(_app(agent=agent)).post(
         "/api/alexa", content=body, headers=headers
     )
@@ -372,7 +363,7 @@ def test_non_string_agent_result_content_uses_safe_fallback(
 
 
 def test_valid_signature_with_wrong_application_id_is_rejected(
-    signed_alexa_request, caplog,
+    signed_alexa_request, caplog
 ):
     body = _body().replace("test-skill-id", "another-skill-id")
     response = TestClient(_app()).post(
@@ -428,7 +419,7 @@ def test_ai_failure_does_not_claim_command_succeeded(signed_alexa_request, caplo
 
 def test_request_logs_do_not_include_user_speech(signed_alexa_request, caplog):
     private_speech = "frase privada de teste"
-    body = _body("IntentRequest").replace("\"oi\"", json.dumps(private_speech))
+    body = _body("IntentRequest").replace('"oi"', json.dumps(private_speech))
 
     response = TestClient(_app()).post(
         "/api/alexa", content=body, headers=signed_alexa_request(body)

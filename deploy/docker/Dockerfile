@@ -18,7 +18,7 @@ RUN VITE_SUPABASE_ANON_KEY="${OPENJARVIS_LEADERBOARD_PUBLIC_ANON}" npm run build
 FROM python:3.12.13-slim-bookworm@sha256:76d4b7b6305788c6b4c6a19d6a22a3921bf802e9af4d5e1e5bd771208dba74bf AS builder
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential ca-certificates curl && \
+    apt-get install -y --no-install-recommends build-essential ca-certificates curl git && \
     rm -rf /var/lib/apt/lists/*
 
 ENV PATH="/root/.cargo/bin:${PATH}"
@@ -39,6 +39,7 @@ COPY pyproject.toml uv.lock README.md ./
 RUN pip install --no-cache-dir uv && \
     uv export --frozen --no-dev --extra server --no-emit-project > requirements.txt && \
     uv pip install --system --no-deps -r requirements.txt && \
+    python3 -m pip install --no-deps --force-reinstall "git+https://github.com/wbond/oscrypto.git@d5f3437ed24257895ae1edd9e503cfb352e635a8" && \
     uv pip install --system --no-deps "maturin>=1.12.6,<2"
 
 # Copy the source and the non-src force-include paths (see pyproject
