@@ -95,9 +95,7 @@ def _restore_sendblue_bindings(app: FastAPI) -> None:
                                 capability_policy=getattr(
                                     app.state, "capability_policy", None
                                 ),
-                                rate_limiter=getattr(
-                                    app.state, "rate_limiter", None
-                                ),
+                                rate_limiter=getattr(app.state, "rate_limiter", None),
                                 agent_id=agent_id,
                             )
 
@@ -385,7 +383,6 @@ def create_app(
         stop_analytics(app)
 
     if memory_service is not None:
-
         @app.on_event("shutdown")
         async def _shutdown_memory_service() -> None:
             svc = getattr(app.state, "memory_service", None)
