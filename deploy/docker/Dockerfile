@@ -39,7 +39,7 @@ COPY pyproject.toml uv.lock README.md ./
 RUN pip install --no-cache-dir uv && \
     uv export --frozen --no-dev --extra server --no-emit-project > requirements.txt && \
     uv pip install --system --no-deps -r requirements.txt && \
-python3 -m pip install --no-deps --force-reinstall "git+https://github.com/wbond/oscrypto.git@d5f3437ed24257895ae1edd9e503cfb352e635a8" && \
+    python3 -m pip install --no-deps --force-reinstall "git+https://github.com/wbond/oscrypto.git@d5f3437ed24257895ae1edd9e503cfb352e635a8" && \
     uv pip install --system --no-deps "maturin>=1.12.6,<2"
 
 # Copy the source and the non-src force-include paths (see pyproject
