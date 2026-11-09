@@ -1,4 +1,3 @@
-
 """Security and response regressions for the Alexa webhook."""
 
 from __future__ import annotations
