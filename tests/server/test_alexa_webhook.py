@@ -207,7 +207,9 @@ def test_stale_timestamp_logs_timestamp_stage(signed_alexa_request, caplog):
     old_timestamp = (datetime.now(timezone.utc) - timedelta(minutes=4)).isoformat()
     body = _body(timestamp=old_timestamp)
 
-    response = TestClient(_app()).post("/api/alexa", content=body, headers=signed_alexa_request(body))
+    response = TestClient(_app()).post(
+        "/api/alexa", content=body, headers=signed_alexa_request(body)
+    )
 
     assert response.status_code == 400
     assert "stage=timestamp" in caplog.text
@@ -227,7 +229,9 @@ def test_valid_signature_reaches_handler_with_agent(signed_alexa_request):
     # ASGI frameworks normalize incoming header names to lower case. The ASK
     # SDK verifier must still find both required headers.
     headers = {key.lower(): value for key, value in signed_alexa_request(body).items()}
-    response = TestClient(_app(agent=agent)).post("/api/alexa", content=body, headers=headers)
+    response = TestClient(_app(agent=agent)).post(
+        "/api/alexa", content=body, headers=headers
+    )
 
     assert response.status_code == 200
     assert agent.queries == ["oi"]
